@@ -645,7 +645,7 @@ final class SettingsWindowController: NSWindowController {
 
     convenience init(app: AppDelegate) {
         let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 520, height: 580),
+            contentRect: NSRect(x: 0, y: 0, width: 520, height: 520),
             styleMask: [.titled, .closable], backing: .buffered, defer: false)
         win.title = "WisprLite Settings"
         win.isReleasedWhenClosed = false
@@ -696,7 +696,10 @@ final class SettingsWindowController: NSWindowController {
         hint.font = .systemFont(ofSize: 11)
         hint.textColor = .tertiaryLabelColor
 
-        let stack = NSStackView(views: [title, grid, hint])
+        let resetBtn = NSButton(title: "Reset to defaults", target: self, action: #selector(resetDefaults))
+        resetBtn.bezelStyle = .rounded
+
+        let stack = NSStackView(views: [title, grid, hint, resetBtn])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 18
@@ -771,6 +774,8 @@ final class SettingsWindowController: NSWindowController {
         app.recorder.deviceUID = uid
     }
 
+    @objc func resetDefaults() { app?.resetConfig() }
+
     @objc func pickStyle(_ sender: NSPopUpButton) {
         guard let app, let s = sender.selectedItem?.representedObject as? String else { return }
         app.cfg.pillStyle = s
@@ -837,6 +842,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applyOverlayConfig() {
         overlay?.configure(minimal: cfg.pillStyle == "minimal", appear: cfg.animAppear,
                            hide: cfg.animHide, hold: cfg.holdDuration)
+    }
+
+    func resetConfig() {
+        cfg = Config()                      // all defaults
+        cfg.save()
+        recorder.deviceUID = cfg.inputDeviceUID
+        applyOverlayConfig()
+        buildMenu()
+        settingsWC?.refresh()
     }
 
     // Check permissions first; only prompt for the ones actually missing.
