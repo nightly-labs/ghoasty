@@ -1,0 +1,90 @@
+#!/bin/bash
+# Build a self-contained, Developer-ID-signed, notarized, stapled WisprLite.app + DMG.
+# Prereq (one time): store notarization creds in the keychain, e.g.
+#   xcrun notarytool store-credentials WisprLiteNotary \
+#     --apple-id you@example.com --team-id ZTRDTUL87R --password <app-specific-password>
+# Then:  ./dist.sh            (set NOTARY_PROFILE=... if you named it differently)
+#        SKIP_NOTARIZE=1 ./dist.sh   # sign + package only, no Apple round-trip
+set -euo pipefail
+cd "$(dirname "$0")"
+
+ID="Developer ID Application: Akudama GmbH (ZTRDTUL87R)"
+APP="WisprLite.app"
+DMG="WisprLite.dmg"
+NOTARY_PROFILE="${NOTARY_PROFILE:-WisprLiteNotary}"
+GGML_SRC="parakeet.cpp/build/third_party/ggml/src"
+SERVER_SRC="parakeet.cpp/build/examples/server/parakeet-server"
+MODEL="models/parakeet-tdt-0.6b-v3-f16.gguf"
+LIBS="libggml libggml-base libggml-cpu libggml-blas libggml-metal"
+
+# 0. compile app + build parakeet.cpp + fetch model (build.sh rebuilds the .app fresh each run)
+./build.sh
+
+# 1. vendor native deps into the bundle so it's relocatable
+echo "==> vendoring native deps into $APP"
+SERVER="$APP/Contents/Helpers/parakeet-server"
+mkdir -p "$APP/Contents/Helpers" "$APP/Contents/Frameworks" "$APP/Contents/Resources/models"
+cp "$SERVER_SRC" "$SERVER"
+for l in $LIBS; do
+  src=$(find "$GGML_SRC" -name "$l.0.dylib" | head -1)
+  [ -n "$src" ] || { echo "!! missing $l.0.dylib"; exit 1; }
+  cp -L "$src" "$APP/Contents/Frameworks/$l.0.dylib"   # deref symlink -> real file at @rpath name
+done
+cp "$MODEL" "$APP/Contents/Resources/models/"
+
+# 2. rewrite rpaths: drop absolute build-tree paths, point at bundle-relative dirs
+echo "==> fixing rpaths"
+strip_abs_rpaths() {   # $1 = Mach-O file
+  otool -l "$1" | awk '/LC_RPATH/{f=1;next} f&&/ path /{print $2;f=0}' | while read -r rp; do
+    case "$rp" in
+      /Users/*|*parakeet.cpp/build*) install_name_tool -delete_rpath "$rp" "$1" 2>/dev/null || true ;;
+    esac
+  done
+}
+strip_abs_rpaths "$SERVER"
+install_name_tool -add_rpath "@loader_path/../Frameworks" "$SERVER"
+for dy in "$APP"/Contents/Frameworks/*.dylib; do
+  strip_abs_rpaths "$dy"
+  install_name_tool -add_rpath "@loader_path" "$dy"     # dylibs cross-reference as @rpath/lib*.0.dylib
+done
+if otool -l "$SERVER" "$APP"/Contents/Frameworks/*.dylib | grep -q "parakeet.cpp/build"; then
+  echo "!! absolute build-tree rpath still present"; exit 1
+fi
+
+# 3. sign inside-out with Developer ID + hardened runtime (nested first, bundle last; no --deep)
+echo "==> signing"
+codesign --force --options runtime --timestamp -s "$ID" "$APP"/Contents/Frameworks/*.dylib
+codesign --force --options runtime --timestamp \
+  --entitlements parakeet-server.entitlements -s "$ID" "$SERVER"
+codesign --force --options runtime --timestamp \
+  --entitlements WisprLite.entitlements -s "$ID" "$APP"
+codesign --verify --deep --strict --verbose=2 "$APP"
+
+if [ "${SKIP_NOTARIZE:-0}" = "1" ]; then
+  echo "==> SKIP_NOTARIZE set — signed but not notarized. Done: $PWD/$APP"
+  exit 0
+fi
+
+# 4. notarize + staple the app
+echo "==> notarizing app (this uploads to Apple and waits)"
+rm -f WisprLite.zip
+ditto -c -k --keepParent "$APP" WisprLite.zip
+xcrun notarytool submit WisprLite.zip --keychain-profile "$NOTARY_PROFILE" --wait
+xcrun stapler staple "$APP"
+rm -f WisprLite.zip
+
+# 5. package DMG, notarize + staple it too
+echo "==> building $DMG"
+rm -f "$DMG"
+STAGE=$(mktemp -d)
+cp -R "$APP" "$STAGE/"
+ln -s /Applications "$STAGE/Applications"
+hdiutil create -volname "WisprLite" -srcfolder "$STAGE" -ov -format UDZO "$DMG"
+rm -rf "$STAGE"
+xcrun notarytool submit "$DMG" --keychain-profile "$NOTARY_PROFILE" --wait
+xcrun stapler staple "$DMG"
+
+echo "==> done"
+echo "    App: $PWD/$APP  (stapled)"
+echo "    DMG: $PWD/$DMG  (stapled, ready to share)"
+echo "Verify: spctl -a -vvv -t exec $APP  &&  xcrun stapler validate $DMG"

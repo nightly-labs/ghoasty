@@ -8,12 +8,31 @@ import ServiceManagement
 // Hold a bound modifier to record, release to transcribe (whisper.cpp) and paste.
 // Two bindings: plain dictate, and dictate+Enter (presses Return after pasting).
 
-let ROOT_DIR = (Bundle.main.bundlePath as NSString).deletingLastPathComponent
-let MODELS_DIR = ROOT_DIR + "/models"
-func modelPath(_ file: String) -> String { MODELS_DIR + "/" + file }
+let BUNDLE_DIR = Bundle.main.bundlePath
+let ROOT_DIR = (BUNDLE_DIR as NSString).deletingLastPathComponent
+
+// Where downloaded (non-default) models land — always writable, unlike /Applications.
+let DOWNLOAD_MODELS_DIR = FileManager.default.homeDirectoryForCurrentUser
+    .appendingPathComponent(".wisprlite/models").path
+// Search order: user downloads, then the model bundled in the app, then the dev build tree.
+let MODEL_SEARCH_DIRS = [
+    DOWNLOAD_MODELS_DIR,
+    BUNDLE_DIR + "/Contents/Resources/models",   // bundled default (read-only, dist build)
+    ROOT_DIR + "/models",                         // sibling folder (dev build.sh layout)
+]
+func existingModelPath(_ file: String) -> String? {
+    MODEL_SEARCH_DIRS.map { $0 + "/" + file }.first { FileManager.default.fileExists(atPath: $0) }
+}
+// Existing copy if we have one, otherwise the writable path a fresh download will use.
+func modelPath(_ file: String) -> String { existingModelPath(file) ?? (DOWNLOAD_MODELS_DIR + "/" + file) }
 
 // Parakeet (parakeet.cpp): ~0.1s/utterance, auto punctuation, resident server on :8090.
-let PARAKEET_SERVER_BIN = ROOT_DIR + "/parakeet.cpp/build/examples/server/parakeet-server"
+// Bundled helper (dist) if present, else the dev build tree beside the app.
+let PARAKEET_SERVER_BIN: String = {
+    let bundled = BUNDLE_DIR + "/Contents/Helpers/parakeet-server"
+    if FileManager.default.fileExists(atPath: bundled) { return bundled }
+    return ROOT_DIR + "/parakeet.cpp/build/examples/server/parakeet-server"
+}()
 
 // Predefined models the app can download (from mudler/parakeet-cpp-gguf).
 struct ModelInfo { let key: String; let file: String; let url: String; let label: String }
@@ -28,7 +47,7 @@ let MODELS: [ModelInfo] = [
               label: "English only (v2) — best for English"),
 ]
 func modelInfo(_ key: String) -> ModelInfo { MODELS.first { $0.key == key } ?? MODELS[0] }
-func modelDownloaded(_ key: String) -> Bool { FileManager.default.fileExists(atPath: modelPath(modelInfo(key).file)) }
+func modelDownloaded(_ key: String) -> Bool { existingModelPath(modelInfo(key).file) != nil }
 
 // ---- Permissions ----
 func accessibilityGranted() -> Bool { AXIsProcessTrusted() }
@@ -438,6 +457,10 @@ final class Downloader: NSObject, URLSessionDownloadDelegate {
 
     func download(_ url: URL, to path: String) {
         destPath = path
+        // Ensure the destination dir exists (~/.wisprlite/models isn't there on a fresh install).
+        try? FileManager.default.createDirectory(
+            at: URL(fileURLWithPath: path).deletingLastPathComponent(),
+            withIntermediateDirectories: true)
         session.downloadTask(with: url).resume()
     }
     func urlSession(_ s: URLSession, downloadTask: URLSessionDownloadTask, didWriteData: Int64,
@@ -795,8 +818,14 @@ func rateForSettleMs(_ ms: Int) -> Double {
 }
 
 // ---- Settings window ----
-final class SettingsWindowController: NSWindowController, NSWindowDelegate {
+final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTextFieldDelegate {
     func windowDidBecomeKey(_ notification: Notification) { refresh() }
+    // Commit an ms field when it loses focus (click outside), not only on Return.
+    func controlTextDidEndEditing(_ obj: Notification) {
+        if let tf = obj.object as? NSTextField, [appearVal, hideVal, holdVal].contains(tf) {
+            editAnimValue(tf)
+        }
+    }
     weak var app: AppDelegate?
     private let dictateChips = NSStackView()
     private let enterChips = NSStackView()
@@ -859,10 +888,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         l.textColor = ok ? .systemGreen : .systemOrange
     }
 
+    private func snap10(_ x: Int) -> Int { (x + 5) / 10 * 10 }   // nearest 10 ms
     private func updateAnimLabels() {
-        appearVal.stringValue = "\(settleMs(appearSlider.doubleValue)) ms"
-        hideVal.stringValue = "\(settleMs(hideSlider.doubleValue)) ms"
-        holdVal.stringValue = "\(Int((holdSlider.doubleValue * 1000).rounded())) ms"
+        appearVal.stringValue = "\(snap10(settleMs(appearSlider.doubleValue))) ms"
+        hideVal.stringValue = "\(snap10(settleMs(hideSlider.doubleValue))) ms"
+        holdVal.stringValue = "\(snap10(Int((holdSlider.doubleValue * 1000).rounded()))) ms"
     }
 
     convenience init(app: AppDelegate) {
@@ -901,7 +931,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         holdSlider.controlSize = .small
         holdSlider.widthAnchor.constraint(equalToConstant: 150).isActive = true
         for f in [appearVal, hideVal, holdVal] {
-            f.target = self; f.action = #selector(editAnimValue)
+            f.target = self; f.action = #selector(editAnimValue); f.delegate = self
         }
 
         let grid = NSGridView(views: [
@@ -1154,9 +1184,15 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         commitAnim()
     }
 
-    // Read the sliders into config, persist, apply, and re-render the ms fields.
+    // Snap each value to the nearest 10 ms, store, persist, apply, and re-render the fields.
     private func commitAnim() {
         guard let app else { return }
+        let aMs = snap10(settleMs(appearSlider.doubleValue))
+        let hMs = snap10(settleMs(hideSlider.doubleValue))
+        let holdMs = snap10(Int((holdSlider.doubleValue * 1000).rounded()))
+        appearSlider.doubleValue = min(max(rateForSettleMs(aMs), appearSlider.minValue), appearSlider.maxValue)
+        hideSlider.doubleValue = min(max(rateForSettleMs(hMs), hideSlider.minValue), hideSlider.maxValue)
+        holdSlider.doubleValue = min(max(Double(holdMs) / 1000, holdSlider.minValue), holdSlider.maxValue)
         app.cfg.animAppear = appearSlider.doubleValue
         app.cfg.animHide = hideSlider.doubleValue
         app.cfg.holdDuration = holdSlider.doubleValue

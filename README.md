@@ -35,18 +35,39 @@ Grant these in **System Settings → Privacy & Security**:
 
 No *Input Monitoring* needed: the hotkey uses a CGEventTap gated by Accessibility.
 
-## Stable code signing (optional but recommended)
+## Local signing (dev)
 
-Rebuilds re-sign the app. Ad-hoc signatures change identity each build, so macOS forgets
-permissions. To sign with a stable identity, create a self-signed code-signing cert once:
+`build.sh` signs with a stable local identity `WisprLiteDev` if present (self-signed cert; see
+git history for the openssl recipe), else ad-hoc. This only makes TCC permissions
+(Accessibility, Microphone) persist across rebuilds **on your own machine** — it is not
+distributable.
+
+## Distribute (Developer ID + notarization)
+
+`dist.sh` produces a **self-contained, notarized** `WisprLite.app` and `WisprLite.dmg` that any
+Apple-Silicon Mac opens with no Gatekeeper warning. It bundles `parakeet-server`, the `libggml*`
+dylibs, and the default model inside the app, rewrites their rpaths to be bundle-relative, signs
+inside-out with `Developer ID Application` + the hardened runtime (entitlements in
+`WisprLite.entitlements` / `parakeet-server.entitlements`), then notarizes and staples both the
+app and the DMG.
+
+One-time: store notarization credentials in the keychain:
 
 ```sh
-# generate + import (see repo history for the openssl recipe), then trust it:
-security add-trusted-cert -r trustRoot -p codeSign \
-  -k ~/Library/Keychains/login.keychain-db wispr-cert.pem
+xcrun notarytool store-credentials WisprLiteNotary \
+  --apple-id you@example.com --team-id ZTRDTUL87R --password <app-specific-password>
 ```
 
-`build.sh` then signs with `WisprLiteDev` automatically; permissions persist across rebuilds.
+(App-specific password from appleid.apple.com. Signing identity is
+`Developer ID Application: Akudama GmbH (ZTRDTUL87R)`.) Then:
+
+```sh
+./dist.sh                    # sign + notarize + build DMG  (NOTARY_PROFILE=... to override name)
+SKIP_NOTARIZE=1 ./dist.sh    # sign + package only, no Apple round-trip (for local testing)
+```
+
+Extra models downloaded via the in-app switcher go to `~/.wisprlite/models` (the bundled default
+stays read-only inside the app).
 
 ## Config
 
