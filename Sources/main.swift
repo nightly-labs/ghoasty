@@ -429,6 +429,37 @@ final class ParakeetServer {
     }
 }
 
+// Downloads a file with progress via URLSession.
+final class Downloader: NSObject, URLSessionDownloadDelegate {
+    private lazy var session = URLSession(configuration: .default, delegate: self, delegateQueue: nil)
+    private var destPath = ""
+    var onProgress: ((Double) -> Void)?
+    var onDone: ((Bool) -> Void)?
+
+    func download(_ url: URL, to path: String) {
+        destPath = path
+        session.downloadTask(with: url).resume()
+    }
+    func urlSession(_ s: URLSession, downloadTask: URLSessionDownloadTask, didWriteData: Int64,
+                    totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
+        guard totalBytesExpectedToWrite > 0 else { return }
+        onProgress?(Double(totalBytesWritten) / Double(totalBytesExpectedToWrite))
+    }
+    func urlSession(_ s: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
+        if let http = downloadTask.response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+            onDone?(false); return
+        }
+        try? FileManager.default.removeItem(atPath: destPath)
+        do {
+            try FileManager.default.moveItem(at: location, to: URL(fileURLWithPath: destPath))
+            onDone?(true)
+        } catch { logf("move failed: \(error)"); onDone?(false) }
+    }
+    func urlSession(_ s: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        if let error { logf("download error: \(error)"); onDone?(false) }   // success handled above
+    }
+}
+
 final class Transcriber {
     static let endpoint = URL(string: "http://127.0.0.1:8090/v1/audio/transcriptions")!
 
@@ -783,7 +814,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private let loginCheck = NSButton(checkboxWithTitle: "Launch WisprLite at login", target: nil, action: nil)
     private let boostCheck = NSButton(checkboxWithTitle: "Boost quiet microphone", target: nil, action: nil)
     private let soundCheck = NSButton(checkboxWithTitle: "Play start / stop sound", target: nil, action: nil)
-    private let modelPopup = NSPopUpButton()
+    private let modelList = NSStackView()
     private let accStatus = NSTextField(labelWithString: "")
     private let micStatus = NSTextField(labelWithString: "")
     private let dictBtn = NSButton(title: "Edit dictionary…", target: nil, action: nil)
@@ -859,7 +890,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         loginCheck.target = self; loginCheck.action = #selector(toggleLogin)
         boostCheck.target = self; boostCheck.action = #selector(toggleBoost)
         soundCheck.target = self; soundCheck.action = #selector(toggleSound)
-        modelPopup.target = self; modelPopup.action = #selector(pickModel)
+        modelList.orientation = .vertical; modelList.alignment = .leading; modelList.spacing = 8
         dictBtn.target = self; dictBtn.action = #selector(openDictionary); dictBtn.bezelStyle = .rounded
         win.delegate = self   // refresh permission status when the window regains focus
         for sl in [appearSlider, hideSlider] {
@@ -879,7 +910,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         let grid = NSGridView(views: [
             [SettingsWindowController.caption("Accessibility"), permRow(accStatus, #selector(openAcc))],
             [SettingsWindowController.caption("Microphone"), permRow(micStatus, #selector(openMic))],
-            [SettingsWindowController.caption("Model"), modelPopup],
+            [SettingsWindowController.caption("Model"), modelList],
             [SettingsWindowController.caption("Dictate"), dictateChips],
             [SettingsWindowController.caption("Dictate + Enter"), enterChips],
             [SettingsWindowController.caption("Microphone"), micPopup],
@@ -964,15 +995,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         setPermLabel(accStatus, accessibilityGranted())
         setPermLabel(micStatus, micGranted())
 
-        modelPopup.removeAllItems()
-        for m in MODELS {
-            let downloading = app?.downloading == true && app?.cfg.model == m.key
-            let suffix = downloading ? "  (downloading…)" : (modelDownloaded(m.key) ? "" : "  (needs download)")
-            modelPopup.addItem(withTitle: m.label + suffix)
-            modelPopup.lastItem?.representedObject = m.key
-        }
-        modelPopup.isEnabled = (app?.downloading != true)
-        modelPopup.selectItem(at: MODELS.firstIndex { $0.key == app?.cfg.model } ?? 0)
+        for v in modelList.arrangedSubviews { modelList.removeArrangedSubview(v); v.removeFromSuperview() }
+        for (i, m) in MODELS.enumerated() { modelList.addArrangedSubview(modelRow(m, index: i)) }
 
         updateAnimLabels()
 
@@ -1018,9 +1042,49 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             openPrivacyPane("Privacy_Microphone")
         }
     }
-    @objc func pickModel(_ sender: NSPopUpButton) {
-        guard let key = sender.selectedItem?.representedObject as? String, key != app?.cfg.model else { return }
-        app?.setModel(key)
+    @objc func useOrDownload(_ sender: NSButton) {
+        guard sender.tag < MODELS.count else { return }
+        app?.setModel(MODELS[sender.tag].key)
+    }
+
+    private func modelRow(_ m: ModelInfo, index: Int) -> NSStackView {
+        let downloaded = modelDownloaded(m.key)
+        let active = app?.cfg.model == m.key
+        let isDownloading = app?.downloadingKey == m.key
+
+        let check = NSTextField(labelWithString: downloaded ? "✓" : "○")
+        check.textColor = downloaded ? .systemGreen : .tertiaryLabelColor
+        check.font = .systemFont(ofSize: 13, weight: .bold)
+        check.widthAnchor.constraint(equalToConstant: 14).isActive = true
+
+        let label = NSTextField(labelWithString: m.label + (active ? "  ·  active" : ""))
+        label.font = .systemFont(ofSize: 12)
+
+        let right: NSView
+        if isDownloading {
+            let bar = NSProgressIndicator()
+            bar.isIndeterminate = false; bar.minValue = 0; bar.maxValue = 1
+            bar.doubleValue = app?.downloadProgress ?? 0
+            bar.controlSize = .small
+            bar.widthAnchor.constraint(equalToConstant: 80).isActive = true
+            let pct = NSTextField(labelWithString: "\(Int((app?.downloadProgress ?? 0) * 100))%")
+            pct.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+            pct.textColor = .secondaryLabelColor
+            let s = NSStackView(views: [bar, pct]); s.spacing = 6; s.alignment = .centerY
+            right = s
+        } else if active {
+            right = NSView()
+        } else {
+            let b = NSButton(title: downloaded ? "Use" : "Download", target: self, action: #selector(useOrDownload(_:)))
+            b.bezelStyle = .rounded; b.controlSize = .small; b.tag = index
+            right = b
+        }
+
+        let spacer = NSView(); spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let row = NSStackView(views: [check, label, spacer, right])
+        row.orientation = .horizontal; row.spacing = 8; row.alignment = .centerY
+        row.widthAnchor.constraint(equalToConstant: 330).isActive = true
+        return row
     }
 
     @objc func toggleClipboard(_ sender: NSButton) {
@@ -1257,7 +1321,8 @@ final class OnboardWindowController: NSWindowController, NSWindowDelegate {
         setStatus(accStatus, accessibilityGranted()); accBtn.isEnabled = !accessibilityGranted()
         let key = app?.cfg.model ?? "multilingual"
         if app?.downloading == true {
-            setStatus(modelStatus, false, "Downloading…"); modelBtn.isEnabled = false
+            setStatus(modelStatus, false, "Downloading… \(Int((app?.downloadProgress ?? 0) * 100))%")
+            modelBtn.isEnabled = false
         } else {
             let dl = modelDownloaded(key)
             setStatus(modelStatus, dl); modelBtn.isEnabled = !dl
@@ -1343,7 +1408,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                            hide: cfg.animHide, hold: cfg.holdDuration)
     }
 
-    private(set) var downloading = false
+    var downloadingKey: String?          // which model is downloading (nil = none)
+    var downloadProgress: Double = 0     // 0…1
+    var downloading: Bool { downloadingKey != nil }
+    private let downloader = Downloader()
 
     // Switch model: download if we don't have it yet, then (re)start the server on it.
     func setModel(_ key: String, then: (() -> Void)? = nil) {
@@ -1361,24 +1429,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    private func refreshModelUI() { settingsWC?.refresh(); onboardWC?.refresh() }
+
     func downloadModel(_ info: ModelInfo, done: @escaping (Bool) -> Void) {
-        downloading = true
-        setState(.warming)
-        settingsWC?.refresh(); onboardWC?.refresh()
-        DispatchQueue.global().async { [weak self] in
-            let p = Process()
-            p.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
-            p.arguments = ["-L", "--fail", "-o", modelPath(info.file), info.url]
-            try? p.run(); p.waitUntilExit()
-            let ok = p.terminationStatus == 0
-            if !ok { try? FileManager.default.removeItem(atPath: modelPath(info.file)) }
+        guard downloadingKey == nil else { return }
+        downloadingKey = info.key; downloadProgress = 0
+        setState(.warming); refreshModelUI()
+        downloader.onProgress = { [weak self] p in
+            DispatchQueue.main.async { self?.downloadProgress = p; self?.refreshModelUI() }
+        }
+        downloader.onDone = { [weak self] ok in
             DispatchQueue.main.async {
-                self?.downloading = false
-                self?.settingsWC?.refresh(); self?.onboardWC?.refresh()
+                self?.downloadingKey = nil
+                self?.refreshModelUI()
                 logf("model download \(info.key): \(ok ? "ok" : "FAILED")")
                 done(ok)
             }
         }
+        guard let url = URL(string: info.url) else { done(false); return }
+        downloader.download(url, to: modelPath(info.file))
     }
 
     func resetConfig() {
