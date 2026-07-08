@@ -592,6 +592,13 @@ final class PillOverlay {
 
 enum Capturing { case none, dictate, dictateEnter }
 
+// Time (ms) for a per-frame lerp at `rate` to reach ~95% of target, at 60 fps.
+func settleMs(_ rate: Double) -> Int {
+    let r = min(max(rate, 0.01), 0.99)
+    let frames = log(0.05) / log(1 - r)
+    return Int((frames / 60.0 * 1000).rounded())
+}
+
 // ---- Settings window ----
 final class SettingsWindowController: NSWindowController {
     weak var app: AppDelegate?
@@ -604,12 +611,36 @@ final class SettingsWindowController: NSWindowController {
     private let appearSlider = NSSlider()
     private let hideSlider = NSSlider()
     private let holdSlider = NSSlider()
+    private let appearVal = SettingsWindowController.valueLabel()
+    private let hideVal = SettingsWindowController.valueLabel()
+    private let holdVal = SettingsWindowController.valueLabel()
 
     static func caption(_ s: String) -> NSTextField {
         let l = NSTextField(labelWithString: s)
         l.font = .systemFont(ofSize: 13)
         l.textColor = .secondaryLabelColor
         return l
+    }
+
+    static func valueLabel() -> NSTextField {
+        let l = NSTextField(labelWithString: "")
+        l.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        l.textColor = .secondaryLabelColor
+        l.alignment = .right
+        l.widthAnchor.constraint(equalToConstant: 58).isActive = true
+        return l
+    }
+
+    private func sliderRow(_ slider: NSSlider, _ value: NSTextField) -> NSStackView {
+        let s = NSStackView(views: [slider, value])
+        s.orientation = .horizontal; s.spacing = 8; s.alignment = .centerY
+        return s
+    }
+
+    private func updateAnimLabels() {
+        appearVal.stringValue = "\(settleMs(appearSlider.doubleValue)) ms"
+        hideVal.stringValue = "\(settleMs(hideSlider.doubleValue)) ms"
+        holdVal.stringValue = "\(Int((holdSlider.doubleValue * 1000).rounded())) ms"
     }
 
     convenience init(app: AppDelegate) {
@@ -649,9 +680,9 @@ final class SettingsWindowController: NSWindowController {
             [SettingsWindowController.caption("Dictate + Enter"), enterChips],
             [SettingsWindowController.caption("Microphone"), micPopup],
             [SettingsWindowController.caption("Overlay"), stylePopup],
-            [SettingsWindowController.caption("Appear speed"), appearSlider],
-            [SettingsWindowController.caption("Hide speed"), hideSlider],
-            [SettingsWindowController.caption("Show after release"), holdSlider],
+            [SettingsWindowController.caption("Appear speed"), sliderRow(appearSlider, appearVal)],
+            [SettingsWindowController.caption("Hide speed"), sliderRow(hideSlider, hideVal)],
+            [SettingsWindowController.caption("Show after release"), sliderRow(holdSlider, holdVal)],
         ])
         grid.rowSpacing = 14
         grid.columnSpacing = 16
@@ -715,6 +746,7 @@ final class SettingsWindowController: NSWindowController {
         appearSlider.doubleValue = app?.cfg.animAppear ?? 0.30
         hideSlider.doubleValue = app?.cfg.animHide ?? 0.30
         holdSlider.doubleValue = app?.cfg.holdDuration ?? 1.5
+        updateAnimLabels()
 
         micPopup.removeAllItems()
         micPopup.addItem(withTitle: "Built-in mic (recommended)")
@@ -751,6 +783,7 @@ final class SettingsWindowController: NSWindowController {
         app.cfg.animHide = hideSlider.doubleValue
         app.cfg.holdDuration = holdSlider.doubleValue
         app.cfg.save(); app.applyOverlayConfig()
+        updateAnimLabels()
     }
 
     @objc func removeKey(_ sender: NSButton) {
