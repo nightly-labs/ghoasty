@@ -1,36 +1,36 @@
 #!/bin/bash
-# Build a self-contained, Developer-ID-signed, notarized, stapled WisprLite.app + DMG.
+# Build a self-contained, Developer-ID-signed, notarized, stapled Ghoasty.app + DMG.
 # Prereq (one time): store notarization creds in the keychain, e.g.
-#   xcrun notarytool store-credentials WisprLiteNotary \
-#     --apple-id you@example.com --team-id ZTRDTUL87R --password <app-specific-password>
-# Then:  ./dist.sh            (set NOTARY_PROFILE=... if you named it differently)
+#   xcrun notarytool store-credentials GhoastyNotary \
+#     --apple-id hello@nightly.app --team-id ZTRDTUL87R --password <app-specific-password>
+# Auto-update: run ./setup-sparkle.sh first (fetches Sparkle, generates keys).
+# Then:  ./dist.sh            (set NOTARY_PROFILE=... if you named the profile differently)
 #        SKIP_NOTARIZE=1 ./dist.sh   # sign + package only, no Apple round-trip
 set -euo pipefail
 cd "$(dirname "$0")"
 
 ID="Developer ID Application: Akudama GmbH (ZTRDTUL87R)"
-APP="WisprLite.app"
-DMG="WisprLite.dmg"
-NOTARY_PROFILE="${NOTARY_PROFILE:-WisprLiteNotary}"
+APP="Ghoasty.app"
+DMG="Ghoasty.dmg"
+NOTARY_PROFILE="${NOTARY_PROFILE:-GhoastyNotary}"
 GGML_SRC="parakeet.cpp/build/third_party/ggml/src"
 SERVER_SRC="parakeet.cpp/build/examples/server/parakeet-server"
-MODEL="models/parakeet-tdt-0.6b-v3-f16.gguf"
 LIBS="libggml libggml-base libggml-cpu libggml-blas libggml-metal"
 
-# 0. compile app + build parakeet.cpp + fetch model (build.sh rebuilds the .app fresh each run)
+# 0. compile app + build parakeet.cpp (build.sh rebuilds the .app fresh each run).
+#    The model is NOT bundled — the app downloads it on first run via onboarding.
 ./build.sh
 
 # 1. vendor native deps into the bundle so it's relocatable
 echo "==> vendoring native deps into $APP"
 SERVER="$APP/Contents/Helpers/parakeet-server"
-mkdir -p "$APP/Contents/Helpers" "$APP/Contents/Frameworks" "$APP/Contents/Resources/models"
+mkdir -p "$APP/Contents/Helpers" "$APP/Contents/Frameworks"
 cp "$SERVER_SRC" "$SERVER"
 for l in $LIBS; do
   src=$(find "$GGML_SRC" -name "$l.0.dylib" | head -1)
   [ -n "$src" ] || { echo "!! missing $l.0.dylib"; exit 1; }
   cp -L "$src" "$APP/Contents/Frameworks/$l.0.dylib"   # deref symlink -> real file at @rpath name
 done
-cp "$MODEL" "$APP/Contents/Resources/models/"
 
 # 2. rewrite rpaths: drop absolute build-tree paths, point at bundle-relative dirs
 echo "==> fixing rpaths"
@@ -53,11 +53,25 @@ fi
 
 # 3. sign inside-out with Developer ID + hardened runtime (nested first, bundle last; no --deep)
 echo "==> signing"
-codesign --force --options runtime --timestamp -s "$ID" "$APP"/Contents/Frameworks/*.dylib
+SIGN=(codesign --force --options runtime --timestamp -s "$ID")
+# 3a. Sparkle framework (sign nested helpers explicitly — Sparkle forbids --deep)
+SPK="$APP/Contents/Frameworks/Sparkle.framework"
+if [ -d "$SPK" ]; then
+  echo "    signing Sparkle.framework"
+  V="$SPK/Versions/B"
+  for x in "$V"/XPCServices/*.xpc; do [ -e "$x" ] && "${SIGN[@]}" "$x"; done
+  [ -e "$V/Autoupdate" ]  && "${SIGN[@]}" "$V/Autoupdate"
+  [ -e "$V/Updater.app" ] && "${SIGN[@]}" "$V/Updater.app"
+  "${SIGN[@]}" "$SPK"
+fi
+# 3b. ggml dylibs
+"${SIGN[@]}" "$APP"/Contents/Frameworks/*.dylib
+# 3c. parakeet-server helper (with its entitlements)
 codesign --force --options runtime --timestamp \
   --entitlements parakeet-server.entitlements -s "$ID" "$SERVER"
+# 3d. outer app LAST (with app entitlements)
 codesign --force --options runtime --timestamp \
-  --entitlements WisprLite.entitlements -s "$ID" "$APP"
+  --entitlements Ghoasty.entitlements -s "$ID" "$APP"
 codesign --verify --deep --strict --verbose=2 "$APP"
 
 if [ "${SKIP_NOTARIZE:-0}" = "1" ]; then
@@ -66,12 +80,12 @@ if [ "${SKIP_NOTARIZE:-0}" = "1" ]; then
 fi
 
 # 4. notarize + staple the app
-echo "==> notarizing app (this uploads to Apple and waits)"
-rm -f WisprLite.zip
-ditto -c -k --keepParent "$APP" WisprLite.zip
-xcrun notarytool submit WisprLite.zip --keychain-profile "$NOTARY_PROFILE" --wait
+echo "==> notarizing app (uploads to Apple and waits)"
+rm -f Ghoasty.zip
+ditto -c -k --keepParent "$APP" Ghoasty.zip
+xcrun notarytool submit Ghoasty.zip --keychain-profile "$NOTARY_PROFILE" --wait
 xcrun stapler staple "$APP"
-rm -f WisprLite.zip
+rm -f Ghoasty.zip
 
 # 5. package DMG, notarize + staple it too
 echo "==> building $DMG"
@@ -79,7 +93,7 @@ rm -f "$DMG"
 STAGE=$(mktemp -d)
 cp -R "$APP" "$STAGE/"
 ln -s /Applications "$STAGE/Applications"
-hdiutil create -volname "WisprLite" -srcfolder "$STAGE" -ov -format UDZO "$DMG"
+hdiutil create -volname "Ghoasty" -srcfolder "$STAGE" -ov -format UDZO "$DMG"
 rm -rf "$STAGE"
 xcrun notarytool submit "$DMG" --keychain-profile "$NOTARY_PROFILE" --wait
 xcrun stapler staple "$DMG"

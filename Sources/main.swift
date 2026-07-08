@@ -3,17 +3,26 @@ import AVFoundation
 import ApplicationServices
 import CoreAudio
 import ServiceManagement
+#if canImport(Sparkle)
+import Sparkle   // auto-update; only linked in the production build (see setup-sparkle.sh)
+#endif
 
-// WisprLite — push-to-talk local dictation.
-// Hold a bound modifier to record, release to transcribe (whisper.cpp) and paste.
+// Ghoasty — push-to-talk local dictation.
+// Hold a bound modifier to record, release to transcribe (Parakeet) and paste.
 // Two bindings: plain dictate, and dictate+Enter (presses Return after pasting).
 
 let BUNDLE_DIR = Bundle.main.bundlePath
 let ROOT_DIR = (BUNDLE_DIR as NSString).deletingLastPathComponent
 
+// All user data lives here: config, history, downloaded models, log. Always writable.
+let DATA_DIR = FileManager.default.homeDirectoryForCurrentUser
+    .appendingPathComponent(".ghoasty")
+func ensureDataDir() {
+    try? FileManager.default.createDirectory(at: DATA_DIR, withIntermediateDirectories: true)
+}
+
 // Where downloaded (non-default) models land — always writable, unlike /Applications.
-let DOWNLOAD_MODELS_DIR = FileManager.default.homeDirectoryForCurrentUser
-    .appendingPathComponent(".wisprlite/models").path
+let DOWNLOAD_MODELS_DIR = DATA_DIR.appendingPathComponent("models").path
 // Search order: user downloads, then the model bundled in the app, then the dev build tree.
 let MODEL_SEARCH_DIRS = [
     DOWNLOAD_MODELS_DIR,
@@ -58,14 +67,14 @@ func openPrivacyPane(_ anchor: String) {
     }
 }
 
-let LOG_URL = FileManager.default.homeDirectoryForCurrentUser
-    .appendingPathComponent("WisprLite/wispr.log")
+let LOG_URL = DATA_DIR.appendingPathComponent("ghoasty.log")
 func logf(_ s: String) {
     let line = s + "\n"
     guard let data = line.data(using: .utf8) else { return }
     if let h = try? FileHandle(forWritingTo: LOG_URL) {
         h.seekToEndOfFile(); h.write(data); try? h.close()
     } else {
+        ensureDataDir()
         try? data.write(to: LOG_URL)
     }
 }
@@ -113,15 +122,11 @@ func chord(fromLegacyKeyCode k: UInt16) -> Int {
     }
 }
 
-// ---- Config persisted to ~/.wisprlite/config.json ----
+// ---- Config persisted to ~/.ghoasty/config.json ----
 struct Config: Codable {
     // Each chord is a Mods rawValue (a set of modifiers held together).
-    var dictateChords: [Int] = [Mods.opt.rawValue]        // ⌥
-    var dictateEnterChords: [Int] = [Mods.cmd.rawValue]   // ⌘
-    // Allowed transcription languages. 1 → forced; >1 → auto limited to these; empty → full auto.
-    var languages: [String] = ["pl"]
-    // Initial prompt biases whisper toward your domain terms / names. Editable here.
-    var prompt: String = "Transkrypcja po polsku. Programowanie, API, frontend, backend, deploy, commit, TypeScript, Rust, Solana."
+    var dictateChords: [Int] = [Mods([.cmd, .shift]).rawValue]   // ⌘⇧
+    var dictateEnterChords: [Int] = []                           // none by default
     // Preferred input device UID. nil → built-in mic (keeps Bluetooth output in A2DP).
     var inputDeviceUID: String? = nil
     // Overlay: "full" (waveform + WPM) or "minimal" (voice indicator only).
@@ -130,7 +135,7 @@ struct Config: Codable {
     var animAppear: Double = 0.30
     var animHide: Double = 0.30
     // Seconds the pill lingers after the key is released before it fades out.
-    var holdDuration: Double = 1.5
+    var holdDuration: Double = 1.0
     // Leave the transcript on the clipboard after pasting (off → restore previous clipboard).
     var leaveInClipboard: Bool = false
     // Text replacements applied to every transcript: each entry is [from, to].
@@ -187,8 +192,7 @@ struct Config: Codable {
         try c.encode(model, forKey: .model)
     }
 
-    static let url = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent(".wisprlite/config.json")
+    static let url = DATA_DIR.appendingPathComponent("config.json")
 
     static func load() -> Config {
         guard let data = try? Data(contentsOf: url),
@@ -203,10 +207,9 @@ struct Config: Codable {
     }
 }
 
-// ---- Recent dictations, newest first, persisted to ~/.wisprlite/history.json ----
+// ---- Recent dictations, newest first, persisted to ~/.ghoasty/history.json ----
 final class History {
-    static let url = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent(".wisprlite/history.json")
+    static let url = DATA_DIR.appendingPathComponent("history.json")
     private(set) var items: [String] = []
 
     init() {
@@ -286,7 +289,7 @@ func deviceID(forUID uid: String) -> AudioDeviceID? {
 }
 
 final class Recorder {
-    let wavURL = FileManager.default.temporaryDirectory.appendingPathComponent("wispr_rec.wav")
+    let wavURL = FileManager.default.temporaryDirectory.appendingPathComponent("ghoasty_rec.wav")
     var deviceUID: String?          // nil → built-in mic
     var boost = true                // AGC + noise gate before transcription
     private var runningPeak: Float = 0.05
@@ -297,7 +300,7 @@ final class Recorder {
     private var curLevel: CGFloat = 0
     private var running = false
 
-    // On-disk WAV: 16 kHz mono PCM16 — what whisper wants.
+    // On-disk WAV: 16 kHz mono PCM16 — what Parakeet wants.
     private let fileSettings: [String: Any] = [
         AVFormatIDKey: Int(kAudioFormatLinearPCM),
         AVSampleRateKey: 16000.0,
@@ -457,7 +460,7 @@ final class Downloader: NSObject, URLSessionDownloadDelegate {
 
     func download(_ url: URL, to path: String) {
         destPath = path
-        // Ensure the destination dir exists (~/.wisprlite/models isn't there on a fresh install).
+        // Ensure the destination dir exists (~/.ghoasty/models isn't there on a fresh install).
         try? FileManager.default.createDirectory(
             at: URL(fileURLWithPath: path).deletingLastPathComponent(),
             withIntermediateDirectories: true)
@@ -499,7 +502,7 @@ final class Transcriber {
     }
 
     private func post(_ audio: Data) -> String? {
-        let boundary = "WisprLiteBoundary7MA4YWxkTrZu0gW"
+        let boundary = "GhoastyBoundary7MA4YWxkTrZu0gW"
         var body = Data()
         body.appendStr("--\(boundary)\r\n")
         body.appendStr("Content-Disposition: form-data; name=\"file\"; filename=\"a.wav\"\r\n")
@@ -591,7 +594,7 @@ final class PillView: NSView {
     var minimal = false                 // voice indicator only (no WPM/timer panel)
     var appearRate: CGFloat = 0.30      // fade-in speed
     var hideRate: CGFloat = 0.30        // fade-out speed
-    var holdDuration: Double = 1.5      // seconds the pill lingers after release
+    var holdDuration: Double = 1.0      // seconds the pill lingers after release
 
     // presence drives scale + opacity of the WHOLE pill as one unit (fade in / fade out).
     private var presence: CGFloat = 0
@@ -817,6 +820,14 @@ func rateForSettleMs(_ ms: Int) -> Double {
     return 1 - exp(log(0.05) / frames)
 }
 
+// Content view that drops text-field focus (commits + clears the ring) on a background click.
+final class FocusDropView: NSView {
+    override func mouseDown(with event: NSEvent) {
+        window?.makeFirstResponder(nil)
+        super.mouseDown(with: event)
+    }
+}
+
 // ---- Settings window ----
 final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTextFieldDelegate {
     func windowDidBecomeKey(_ notification: Notification) { refresh() }
@@ -840,7 +851,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
     private let hideVal = SettingsWindowController.valueField()
     private let holdVal = SettingsWindowController.valueField()
     private let clipboardCheck = NSButton(checkboxWithTitle: "Leave transcript in clipboard", target: nil, action: nil)
-    private let loginCheck = NSButton(checkboxWithTitle: "Launch WisprLite at login", target: nil, action: nil)
+    private let loginCheck = NSButton(checkboxWithTitle: "Launch Ghoasty at login", target: nil, action: nil)
     private let boostCheck = NSButton(checkboxWithTitle: "Boost quiet microphone", target: nil, action: nil)
     private let soundCheck = NSButton(checkboxWithTitle: "Play start / stop sound", target: nil, action: nil)
     private let modelList = NSStackView()
@@ -899,7 +910,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         let win = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 640, height: 700),
             styleMask: [.titled, .closable], backing: .buffered, defer: false)
-        win.title = "WisprLite Settings"
+        win.title = "Ghoasty Settings"
         win.isReleasedWhenClosed = false
         self.init(window: win)
         self.app = app
@@ -972,6 +983,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         stack.spacing = 12
         stack.translatesAutoresizingMaskIntoConstraints = false
 
+        win.contentView = FocusDropView()   // click empty space to drop field focus
         let content = win.contentView!
         content.addSubview(stack)
         NSLayoutConstraint.activate([
@@ -1013,7 +1025,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         stylePopup.selectItem(at: app?.cfg.pillStyle == "minimal" ? 1 : 0)
         appearSlider.doubleValue = app?.cfg.animAppear ?? 0.30
         hideSlider.doubleValue = app?.cfg.animHide ?? 0.30
-        holdSlider.doubleValue = app?.cfg.holdDuration ?? 1.5
+        holdSlider.doubleValue = app?.cfg.holdDuration ?? 1.0
         clipboardCheck.state = (app?.cfg.leaveInClipboard ?? false) ? .on : .off
         loginCheck.state = (SMAppService.mainApp.status == .enabled) ? .on : .off
         boostCheck.state = (app?.cfg.boostMic ?? true) ? .on : .off
@@ -1243,6 +1255,7 @@ final class DictWindowController: NSWindowController, NSWindowDelegate {
         stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 14
         stack.translatesAutoresizingMaskIntoConstraints = false
         stack.edgeInsets = NSEdgeInsets(top: 20, left: 20, bottom: 20, right: 20)
+        win.contentView = FocusDropView()   // click empty space to drop field focus
         let content = win.contentView!
         content.addSubview(stack)
         NSLayoutConstraint.activate([
@@ -1316,32 +1329,41 @@ final class OnboardWindowController: NSWindowController, NSWindowDelegate {
     private let micBtn = NSButton(title: "Grant", target: nil, action: nil)
     private let accBtn = NSButton(title: "Grant", target: nil, action: nil)
     private let modelBtn = NSButton(title: "Download", target: nil, action: nil)
+    private let hotkeyBtn = NSButton(title: "Customize…", target: nil, action: nil)
     private var timer: Timer?
 
     convenience init(app: AppDelegate) {
-        let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 300),
+        let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 360),
                            styleMask: [.titled, .closable], backing: .buffered, defer: false)
-        win.title = "Welcome to WisprLite"; win.isReleasedWhenClosed = false
+        win.title = "Welcome to Ghoasty"; win.isReleasedWhenClosed = false
         self.init(window: win); self.app = app; win.delegate = self
 
-        let title = NSTextField(labelWithString: "Welcome to WisprLite")
+        let title = NSTextField(labelWithString: "Welcome to Ghoasty")
         title.font = .systemFont(ofSize: 18, weight: .bold)
-        let subtitle = NSTextField(labelWithString: "Grant two permissions and download a model to start dictating.")
+        let subtitle = NSTextField(labelWithString: "Grant two permissions — the model downloads automatically.")
         subtitle.font = .systemFont(ofSize: 12); subtitle.textColor = .secondaryLabelColor
 
         micBtn.target = self; micBtn.action = #selector(grantMic)
         accBtn.target = self; accBtn.action = #selector(grantAcc)
         modelBtn.target = self; modelBtn.action = #selector(downloadStep)
-        for b in [micBtn, accBtn, modelBtn] { b.bezelStyle = .rounded }
+        hotkeyBtn.target = self; hotkeyBtn.action = #selector(customizeHotkeys)
+        for b in [micBtn, accBtn, modelBtn, hotkeyBtn] { b.bezelStyle = .rounded }
+
+        // Explains the default push-to-talk keys; changing them is optional.
+        let hotkeyInfo = NSTextField(wrappingLabelWithString:
+            "Hold ⌘⇧ to dictate. “Dictate + Enter” is off — add or change either combo anytime.")
+        hotkeyInfo.font = .systemFont(ofSize: 11); hotkeyInfo.textColor = .secondaryLabelColor
+        hotkeyInfo.widthAnchor.constraint(equalToConstant: 210).isActive = true
 
         let grid = NSGridView(views: [
             [step("1. Microphone"), micStatus, micBtn],
             [step("2. Accessibility"), accStatus, accBtn],
             [step("3. Model"), modelStatus, modelBtn],
+            [step("4. Hotkeys"), hotkeyInfo, hotkeyBtn],
         ])
         grid.rowSpacing = 16; grid.columnSpacing = 14
         grid.column(at: 0).xPlacement = .leading
-        for i in 0..<3 { grid.row(at: i).yPlacement = .center }
+        for i in 0..<4 { grid.row(at: i).yPlacement = .center }
 
         let done = NSButton(title: "Done", target: self, action: #selector(finish))
         done.bezelStyle = .rounded; done.keyEquivalent = "\r"
@@ -1384,6 +1406,8 @@ final class OnboardWindowController: NSWindowController, NSWindowDelegate {
         }
     }
 
+    @objc private func customizeHotkeys() { app?.openSettings() }
+
     @objc private func grantMic() {
         if AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined {
             AVCaptureDevice.requestAccess(for: .audio) { _ in DispatchQueue.main.async { self.refresh() } }
@@ -1401,6 +1425,8 @@ final class OnboardWindowController: NSWindowController, NSWindowDelegate {
 
     func show() {
         refresh()
+        // Model is no longer bundled — kick off the download automatically on first run.
+        if let app, !app.downloading, !modelDownloaded(app.cfg.model) { app.setModel(app.cfg.model) }
         if timer == nil {
             timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in self?.refresh() }
         }
@@ -1428,15 +1454,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var dictWC: DictWindowController?
     var onboardWC: OnboardWindowController?
     var overlay: PillOverlay?
+    #if canImport(Sparkle)
+    // Drives auto-updates (background checks + "Check for Updates…"). Feed + key in Info.plist.
+    lazy var updaterController = SPUStandardUpdaterController(
+        startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
+    #endif
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Single instance: if another copy is already running, hand off and quit.
-        let bid = Bundle.main.bundleIdentifier ?? "com.local.wisprlite"
+        let bid = Bundle.main.bundleIdentifier ?? "com.akudama.ghoasty"
         let others = NSRunningApplication.runningApplications(withBundleIdentifier: bid)
             .filter { $0 != .current }
         if !others.isEmpty { others.first?.activate(); NSApp.terminate(nil); return }
 
         setState(.warming)                         // warming up until the model loads
+        #if canImport(Sparkle)
+        _ = updaterController                       // kick off background update checks
+        #endif
         buildMenu()
         overlay = PillOverlay(levelProvider: { [weak self] in self?.recorder.level() ?? 0 })
         applyOverlayConfig()
@@ -1551,7 +1585,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             tap: .cgSessionEventTap, place: .headInsertEventTap,
             options: .listenOnly, eventsOfInterest: mask, callback: cb, userInfo: ptr)
         else {
-            logf("EVENT TAP FAILED — grant Accessibility to WisprLite")
+            logf("EVENT TAP FAILED — grant Accessibility to Ghoasty")
             return
         }
         eventTap = tap
@@ -1650,20 +1684,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    // Loads a bundled PNG sized for the menu bar. `template` = adapts to light/dark + tintable.
+    private func menuImage(_ name: String, template: Bool) -> NSImage? {
+        guard let url = Bundle.main.url(forResource: name, withExtension: "png"),
+              let img = NSImage(contentsOf: url) else { return nil }
+        let h: CGFloat = 18
+        img.size = NSSize(width: h * img.size.width / max(img.size.height, 1), height: h)
+        img.isTemplate = template
+        return img
+    }
+    // White ghost (adapts to menubar) for idle states; yellow ghost while dictation is active.
+    lazy var menuIcon: NSImage? = menuImage("MenuIcon", template: true)
+    lazy var menuIconActive: NSImage? = menuImage("MenuIconActive", template: false)
+
     enum IconState { case warming, ready, recording, processing, error }
     func setState(_ s: IconState) {
         DispatchQueue.main.async {
             guard let btn = self.statusItem.button else { return }
-            let name: String, tint: NSColor?
-            switch s {
-            case .warming:    name = "hourglass";                    tint = nil
-            case .ready:      name = "mic";                          tint = nil
-            case .recording:  name = "mic.fill";                     tint = .systemRed
-            case .processing: name = "waveform";                     tint = nil
-            case .error:      name = "exclamationmark.triangle.fill"; tint = .systemOrange
+            // Dictation active → the yellow ghost (its own colour). Other states → white ghost + tint.
+            if s == .recording {
+                btn.image = self.menuIconActive ?? self.menuIcon
+                btn.contentTintColor = nil
+                btn.title = ""
+                return
             }
-            let img = NSImage(systemSymbolName: name, accessibilityDescription: "WisprLite")
-            img?.isTemplate = (tint == nil)          // template adapts to the menubar theme
+            let tint: NSColor?
+            switch s {
+            case .warming:    tint = .tertiaryLabelColor   // dimmed while the model loads
+            case .ready:      tint = nil                    // normal
+            case .processing: tint = .controlAccentColor
+            case .error:      tint = .systemOrange
+            case .recording:  tint = nil                    // handled above
+            }
+            let img = self.menuIcon
+                ?? NSImage(systemSymbolName: "mic", accessibilityDescription: "Ghoasty")
+            img?.isTemplate = true
             btn.image = img
             btn.contentTintColor = tint
             btn.title = ""
@@ -1672,7 +1727,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func buildMenu() {
         let menu = NSMenu()
-        let ver = menu.addItem(withTitle: "WisprLite 0.1 · Parakeet v3", action: nil, keyEquivalent: "")
+        let ver = menu.addItem(withTitle: "Ghoasty 1.0 · Parakeet v3", action: nil, keyEquivalent: "")
         ver.isEnabled = false
         menu.addItem(.separator())
         let names = { (cs: [Int]) in cs.isEmpty ? "—" : cs.map { Mods(rawValue: $0).name }.joined(separator: ", ") }
@@ -1700,6 +1755,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let s = menu.addItem(withTitle: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
         s.target = self
+        #if canImport(Sparkle)
+        let upd = menu.addItem(withTitle: "Check for Updates…",
+                               action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)),
+                               keyEquivalent: "")
+        upd.target = updaterController
+        #endif
         menu.addItem(.separator())
         let q = menu.addItem(withTitle: "Quit", action: #selector(quit), keyEquivalent: "q")
         q.target = self

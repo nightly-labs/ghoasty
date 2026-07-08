@@ -1,12 +1,21 @@
 #!/bin/bash
+# Dev build: compile Ghoasty, assemble the .app, self-sign for stable local permissions.
+# Production packaging (Developer ID + notarize + DMG) lives in dist.sh.
 set -euo pipefail
 cd "$(dirname "$0")"
 
-APP="WisprLite.app"
+APP="Ghoasty.app"
+BIN="Ghoasty"
+VERSION="1.0"
+BUILD="1"
+BUNDLE_ID="com.akudama.ghoasty"
 PK_MODEL="models/parakeet-tdt-0.6b-v3-f16.gguf"
 PK_MODEL_URL="https://huggingface.co/mudler/parakeet-cpp-gguf/resolve/main/tdt-0.6b-v3-f16.gguf"
+# Sparkle public EdDSA key — filled in from setup-sparkle.sh output. Empty = updates disabled.
+SU_FEED_URL="https://updates.akudama.com/ghoasty/appcast.xml"
+SU_PUBLIC_ED_KEY="${SU_PUBLIC_ED_KEY:-}"
 
-# 1. model — kept beside the app, not bundled
+# 1. model — kept beside the app in dev; dist.sh bundles it into the app
 mkdir -p models
 if [ ! -f "$PK_MODEL" ]; then
   echo "==> downloading Parakeet v3 model (~1.4GB)..."
@@ -23,43 +32,63 @@ if [ ! -x parakeet.cpp/build/examples/server/parakeet-server ]; then
     && cmake --build build -j )
 fi
 
-# 2. compile
+# 2. compile — link Sparkle only if the framework has been fetched (setup-sparkle.sh)
 echo "==> compiling..."
 mkdir -p build
-swiftc -O Sources/main.swift -o build/WisprLite \
-  -framework AppKit -framework AVFoundation
+SPARKLE_FLAGS=()
+if [ -d "Frameworks/Sparkle.framework" ]; then
+  echo "    (Sparkle framework found — enabling auto-update)"
+  SPARKLE_FLAGS=(-F Frameworks -framework Sparkle
+                 -Xlinker -rpath -Xlinker "@loader_path/../Frameworks")
+fi
+swiftc -O Sources/main.swift -o "build/$BIN" \
+  -framework AppKit -framework AVFoundation ${SPARKLE_FLAGS[@]+"${SPARKLE_FLAGS[@]}"}
 
-# 3. assemble .app bundle (model referenced from ../models, not copied in)
+# 3. assemble .app bundle
 echo "==> bundling..."
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS"
-cp build/WisprLite "$APP/Contents/MacOS/WisprLite"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+cp "build/$BIN" "$APP/Contents/MacOS/$BIN"
+[ -f assets/AppIcon.icns ] && cp assets/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
+[ -f assets/MenuIcon.png ] && cp assets/MenuIcon.png "$APP/Contents/Resources/MenuIcon.png"
+[ -f assets/MenuIconActive.png ] && cp assets/MenuIconActive.png "$APP/Contents/Resources/MenuIconActive.png"
+if [ -d "Frameworks/Sparkle.framework" ]; then
+  mkdir -p "$APP/Contents/Frameworks"
+  cp -R "Frameworks/Sparkle.framework" "$APP/Contents/Frameworks/"
+fi
 
-cat > "$APP/Contents/Info.plist" <<'PLIST'
+cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>CFBundleExecutable</key><string>WisprLite</string>
-  <key>CFBundleIdentifier</key><string>com.local.wisprlite</string>
-  <key>CFBundleName</key><string>WisprLite</string>
+  <key>CFBundleExecutable</key><string>$BIN</string>
+  <key>CFBundleIdentifier</key><string>$BUNDLE_ID</string>
+  <key>CFBundleName</key><string>Ghoasty</string>
+  <key>CFBundleDisplayName</key><string>Ghoasty</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.1</string>
+  <key>CFBundleShortVersionString</key><string>$VERSION</string>
+  <key>CFBundleVersion</key><string>$BUILD</string>
+  <key>LSApplicationCategoryType</key><string>public.app-category.productivity</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>LSUIElement</key><true/>
-  <key>NSMicrophoneUsageDescription</key><string>WisprLite records your voice to transcribe it.</string>
+  <key>NSHumanReadableCopyright</key><string>Copyright © 2026 Akudama GmbH. All rights reserved.</string>
+  <key>NSMicrophoneUsageDescription</key><string>Ghoasty records your voice so it can transcribe your speech on-device.</string>
+  <key>SUFeedURL</key><string>$SU_FEED_URL</string>
+  <key>SUPublicEDKey</key><string>$SU_PUBLIC_ED_KEY</string>
+  <key>SUEnableAutomaticChecks</key><true/>
 </dict>
 </plist>
 PLIST
 
 # 4. sign. Prefer the stable WisprLiteDev identity so macOS permissions
-#    (Accessibility, Mic, Input Monitoring) persist across rebuilds.
-#    Falls back to ad-hoc until the cert is trusted (see trust step in README).
+#    (Accessibility, Mic) persist across rebuilds. Falls back to ad-hoc.
 if security find-identity -v -p codesigning 2>/dev/null | grep -q "WisprLiteDev"; then
   echo "==> signing with stable identity WisprLiteDev"
   codesign --force --deep -s "WisprLiteDev" "$APP"
 else
-  echo "==> WisprLiteDev not trusted yet — signing ad-hoc (permissions won't persist)"
+  echo "==> WisprLiteDev not present — signing ad-hoc (permissions won't persist)"
   codesign --force --deep -s - "$APP"
 fi
 

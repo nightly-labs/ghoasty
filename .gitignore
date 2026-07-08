@@ -2,11 +2,17 @@
 build/
 *.app/
 
-# whisper models — large (1.5GB+), fetched by build.sh
+# Parakeet models — large (1.4GB+), fetched by build.sh
 models/
 
-# runtime
+# runtime + distributables
 wispr.log
+elaborate.log
+*.dmg
+*.zip
+
+# Sparkle framework + generated keys — fetched by setup-sparkle.sh
+Frameworks/
 
 # code-signing cert — machine-specific, regenerated locally (see README)
 *.pem
@@ -19,3 +25,5 @@ wispr.log
 # parakeet.cpp build tree (cloned + built locally)
 parakeet.cpp/
 parakeet-env/
+
+.codex-tmp/
