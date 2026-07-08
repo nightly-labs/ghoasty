@@ -1,44 +1,67 @@
-import { useMemo } from 'react'
+import { useEffect, useRef } from 'react'
 
-const CHARS = '  ..::;;xX8#0Ð+='
+const COLS = 240
+const ROWS = 90
+const CELLS = COLS * ROWS
+const GLYPHS = '·.:;xX08#=+-'
 
-// Deterministic hash → no Math.random(), so SSR and client render identically.
+// Deterministic hash → SSR and first client render produce the same field (no hydration mismatch).
 function seeded(x: number, y: number) {
   const n = Math.sin(x * 12.9898 + y * 78.233) * 43758.5453
   return n - Math.floor(n)
 }
 
-/**
- * A faint monospace character field layered over the hero gradient.
- * Purely decorative: aria-hidden, non-interactive, unselectable.
- */
-export function AsciiTexture({ cols = 200, rows = 80 }: { cols?: number; rows?: number }) {
-  const text = useMemo(() => {
-    const lines: string[] = []
-    for (let y = 0; y < rows; y++) {
-      let line = ''
-      for (let x = 0; x < cols; x++) {
-        // Brightness rises toward the top, matching where the glow sits.
-        const bias = 1 - y / rows
-        const v = seeded(x, y) * 0.7 + bias * 0.5
-        line += CHARS[Math.min(CHARS.length - 1, Math.floor(v * CHARS.length))]
-      }
-      lines.push(line)
+// Dense static scatter. Shared by the SSR render and the animation's rest state.
+function baseField() {
+  const buf: string[] = new Array(CELLS)
+  for (let y = 0; y < ROWS; y++) {
+    for (let x = 0; x < COLS; x++) {
+      const v = seeded(x, y)
+      buf[y * COLS + x] = v > 0.42 ? GLYPHS[Math.floor(seeded(y, x) * GLYPHS.length)] : ' '
     }
-    return lines.join('\n')
-  }, [cols, rows])
+  }
+  return buf
+}
+
+function render(buf: string[]) {
+  const lines: string[] = new Array(ROWS)
+  for (let y = 0; y < ROWS; y++) lines[y] = buf.slice(y * COLS, y * COLS + COLS).join('')
+  return lines.join('\n')
+}
+
+const STATIC = render(baseField())
+
+export function AsciiTexture() {
+  const ref = useRef<HTMLPreElement>(null)
+
+  useEffect(() => {
+    const el = ref.current
+    if (!el) return
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
+
+    const buf = baseField()
+    const rnd = () => Math.random()
+    const TWINKLE = Math.round(CELLS * 0.008) // ~170 cells/tick → gentle shimmer
+
+    const tick = () => {
+      for (let n = 0; n < TWINKLE; n++) {
+        const idx = Math.floor(rnd() * CELLS)
+        buf[idx] = rnd() > 0.45 ? GLYPHS[Math.floor(rnd() * GLYPHS.length)] : ' '
+      }
+      el.textContent = render(buf)
+    }
+
+    const id = window.setInterval(tick, 90)
+    return () => window.clearInterval(id)
+  }, [])
 
   return (
     <pre
+      ref={ref}
       aria-hidden="true"
-      style={{
-        WebkitMaskImage:
-          'radial-gradient(70% 70% at 50% 42%, #000 0%, transparent 75%)',
-        maskImage: 'radial-gradient(70% 70% at 50% 42%, #000 0%, transparent 75%)',
-      }}
-      className="pointer-events-none absolute inset-0 m-0 h-full w-full select-none overflow-hidden whitespace-pre font-mono text-[10px] leading-[11px] text-white/[0.11] mix-blend-screen"
+      className="pointer-events-none absolute inset-0 m-0 select-none overflow-hidden whitespace-pre font-mono text-[11px] leading-[16px] tracking-[0.12em] text-white/[0.16] mix-blend-screen"
     >
-      {text}
+      {STATIC}
     </pre>
   )
 }

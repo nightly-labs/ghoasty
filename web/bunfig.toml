@@ -1,0 +1,7 @@
+# The TanStack Start scaffold pins nitro to a nightly build (package.json:
+# "nitro": "npm:nitro-nightly@latest"), whose transitive deps are published
+# continuously. The global bun `minimumReleaseAge` policy (24h) blocks those
+# fresh packages, so relax the age gate *inside this project only* — your global
+# policy still applies to every other repo/install.
+[install]
+minimumReleaseAge = 0

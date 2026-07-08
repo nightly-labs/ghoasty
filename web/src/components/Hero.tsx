@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react'
 import { AsciiTexture } from './AsciiTexture'
 import { MeshBackground } from './MeshBackground'
 
@@ -16,8 +17,13 @@ function AppleGlyph() {
 }
 
 export function Hero() {
+  // Play the staggered entrance on mount. SSR renders the pre-reveal state
+  // (shown=false), matching the first client render → no hydration mismatch.
+  const [shown, setShown] = useState(false)
+  useEffect(() => setShown(true), [])
+
   return (
-    <main className="relative min-h-screen overflow-hidden">
+    <main className={`t-stagger relative min-h-screen overflow-hidden ${shown ? 'is-shown' : ''}`}>
       {/* WebGL mesh gradient (client), over a CSS-glow SSR fallback, + faint ASCII field. */}
       <div className="ghoasty-glow absolute inset-0" />
       <MeshBackground />
@@ -28,7 +34,7 @@ export function Hero() {
       <div className="absolute inset-0 bg-[radial-gradient(120%_100%_at_50%_45%,transparent_0%,rgba(8,8,12,0.6)_100%)]" />
 
       {/* Wordmark */}
-      <header className="absolute inset-x-0 top-0 z-10 flex items-center justify-center gap-2.5 p-6 sm:p-8">
+      <header className="t-stagger-line t-stagger-line--1 absolute inset-x-0 top-0 z-10 flex items-center justify-center gap-2.5 p-6 sm:p-8">
         <img
           src="/app-icon.png"
           alt="Ghoasty"
@@ -41,17 +47,18 @@ export function Hero() {
 
       <div className="relative flex min-h-screen flex-col items-center justify-center px-6 py-24 text-center">
         <h1 className="text-5xl font-semibold leading-[0.95] tracking-tight sm:text-7xl lg:text-8xl">
-          Talk. It types.
-          <br />
-          <span className="text-white/60">Nothing leaves your Mac.</span>
+          <span className="t-stagger-line t-stagger-line--2 block">Talk. It types.</span>
+          <span className="t-stagger-line t-stagger-line--3 block text-white/60">
+            Nothing leaves your Mac.
+          </span>
         </h1>
-        <p className="mt-6 max-w-xl text-base text-balance text-white/60 sm:text-lg">
+        <p className="t-stagger-line t-stagger-line--4 mt-6 max-w-xl text-base text-balance text-white/60 sm:text-lg">
           On-device push-to-talk dictation for macOS. Hold, speak, release — transcribed
           locally in a blink and pasted right where your cursor is. Private by design, and
           we never sell your data.
         </p>
 
-        <div className="mt-9 flex flex-col items-center gap-3">
+        <div className="t-stagger-line t-stagger-line--5 mt-9 flex flex-col items-center gap-3">
           <a
             href="#"
             className="group inline-flex items-center gap-2.5 rounded-full bg-white px-6 py-3.5 text-base font-medium text-black transition-transform duration-150 hover:scale-[1.02] active:scale-[0.99]"
@@ -63,7 +70,7 @@ export function Hero() {
         </div>
 
         {/* Stats */}
-        <dl className="mt-16 flex justify-center gap-10 sm:gap-14">
+        <dl className="t-stagger-line t-stagger-line--6 mt-16 flex justify-center gap-10 sm:gap-14">
           {STATS.map((s) => (
             <div key={s.label}>
               <dt className="font-mono text-3xl tabular-nums tracking-tight text-white sm:text-4xl">
