@@ -1,4 +1,5 @@
 import { AsciiTexture } from './AsciiTexture'
+import { MeshBackground } from './MeshBackground'
 
 const STATS = [
   { value: '100%', label: 'on-device' },
@@ -17,11 +18,14 @@ function AppleGlyph() {
 export function Hero() {
   return (
     <main className="relative min-h-screen overflow-hidden">
-      {/* Iridescent gradient glow + faint ASCII field. */}
+      {/* WebGL mesh gradient (client), over a CSS-glow SSR fallback, + faint ASCII field. */}
       <div className="ghoasty-glow absolute inset-0" />
+      <MeshBackground />
+      {/* Dark scrim so the vivid mesh doesn't wash out the copy. */}
+      <div className="absolute inset-0 bg-[#08080c]/25" />
       <AsciiTexture />
       {/* Vignette to seat the copy. */}
-      <div className="absolute inset-0 bg-[radial-gradient(120%_90%_at_50%_0%,transparent_35%,rgba(8,8,12,0.65)_100%)]" />
+      <div className="absolute inset-0 bg-[radial-gradient(120%_100%_at_50%_45%,transparent_0%,rgba(8,8,12,0.6)_100%)]" />
 
       {/* Wordmark */}
       <header className="absolute inset-x-0 top-0 z-10 flex items-center justify-center gap-2.5 p-6 sm:p-8">
