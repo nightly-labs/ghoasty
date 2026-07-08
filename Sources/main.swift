@@ -117,10 +117,12 @@ struct Config: Codable {
     // Animation lerp rates (per frame): higher = snappier. Separate for appear / hide.
     var animAppear: Double = 0.30
     var animHide: Double = 0.30
+    // Seconds the pill lingers after the key is released before it fades out.
+    var holdDuration: Double = 1.5
 
     enum CodingKeys: String, CodingKey {
         case dictateChords, dictateEnterChords, languages, prompt, inputDeviceUID, engine
-        case pillStyle, animAppear, animHide
+        case pillStyle, animAppear, animHide, holdDuration
         case dictateKeys, dictateEnterKeys  // legacy
     }
 
@@ -142,6 +144,7 @@ struct Config: Codable {
         if let s = try? c.decode(String.self, forKey: .pillStyle) { pillStyle = s }
         if let x = try? c.decode(Double.self, forKey: .animAppear) { animAppear = x }
         if let x = try? c.decode(Double.self, forKey: .animHide) { animHide = x }
+        if let x = try? c.decode(Double.self, forKey: .holdDuration) { holdDuration = x }
     }
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
@@ -154,6 +157,7 @@ struct Config: Codable {
         try c.encode(pillStyle, forKey: .pillStyle)
         try c.encode(animAppear, forKey: .animAppear)
         try c.encode(animHide, forKey: .animHide)
+        try c.encode(holdDuration, forKey: .holdDuration)
     }
 
     static let url = FileManager.default.homeDirectoryForCurrentUser
@@ -484,6 +488,7 @@ final class PillView: NSView {
     var minimal = false                 // voice indicator only (no WPM/timer panel)
     var appearRate: CGFloat = 0.30      // fade-in speed
     var hideRate: CGFloat = 0.30        // fade-out speed
+    var holdDuration: Double = 1.5      // seconds the pill lingers after release
 
     // presence drives scale + opacity of the WHOLE pill as one unit (fade in / fade out).
     private var presence: CGFloat = 0
@@ -532,18 +537,26 @@ final class PillView: NSView {
         recStart = nil
     }
 
-    // Swap the live timer for the final WPM (count up), then fade the whole pill out.
-    func showStats(wpm: Int) {
+    // Linger for holdDuration, then fade the whole pill out.
+    private func scheduleHide() {
         statsToken += 1
         let t = statsToken
+        DispatchQueue.main.asyncAfter(deadline: .now() + max(0, holdDuration)) { [weak self] in
+            guard let self, self.statsToken == t else { return }
+            self.presenceTarget = 0          // whole pill fades together
+        }
+    }
+
+    // Keep showing (e.g. minimal mode) for holdDuration, then fade out.
+    func holdThenHide() { recStart = nil; scheduleHide() }
+
+    // Swap the live timer for the final WPM (count up), hold, then fade the whole pill out.
+    func showStats(wpm: Int) {
         mode = .wpm
         recStart = nil
         wpmTarget = CGFloat(wpm)
         wpmDisplay = 0
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) { [weak self] in
-            guard let self, self.statsToken == t else { return }
-            self.presenceTarget = 0          // whole pill (waveform + number) fades together
-        }
+        scheduleHide()
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -668,11 +681,16 @@ final class PillOverlay {
         DispatchQueue.main.async { self.view.showStats(wpm: wpm) }
     }
 
-    func configure(minimal: Bool, appear: Double, hide: Double) {
+    func holdThenHide() {
+        DispatchQueue.main.async { self.view.holdThenHide() }
+    }
+
+    func configure(minimal: Bool, appear: Double, hide: Double, hold: Double) {
         DispatchQueue.main.async {
             self.view.minimal = minimal
             self.view.appearRate = CGFloat(appear)
             self.view.hideRate = CGFloat(hide)
+            self.view.holdDuration = hold
         }
     }
 }
@@ -693,6 +711,7 @@ final class SettingsWindowController: NSWindowController {
     private let stylePopup = NSPopUpButton()
     private let appearSlider = NSSlider()
     private let hideSlider = NSSlider()
+    private let holdSlider = NSSlider()
 
     static func caption(_ s: String) -> NSTextField {
         let l = NSTextField(labelWithString: s)
@@ -703,7 +722,7 @@ final class SettingsWindowController: NSWindowController {
 
     convenience init(app: AppDelegate) {
         let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 520, height: 540),
+            contentRect: NSRect(x: 0, y: 0, width: 520, height: 580),
             styleMask: [.titled, .closable], backing: .buffered, defer: false)
         win.title = "WisprLite Settings"
         win.isReleasedWhenClosed = false
@@ -730,6 +749,10 @@ final class SettingsWindowController: NSWindowController {
             sl.controlSize = .small
             sl.widthAnchor.constraint(equalToConstant: 150).isActive = true
         }
+        holdSlider.minValue = 0.0; holdSlider.maxValue = 4.0   // seconds after release
+        holdSlider.target = self; holdSlider.action = #selector(changeAnim)
+        holdSlider.controlSize = .small
+        holdSlider.widthAnchor.constraint(equalToConstant: 150).isActive = true
 
         let grid = NSGridView(views: [
             [SettingsWindowController.caption("Engine"), enginePopup],
@@ -740,11 +763,12 @@ final class SettingsWindowController: NSWindowController {
             [SettingsWindowController.caption("Overlay"), stylePopup],
             [SettingsWindowController.caption("Appear speed"), appearSlider],
             [SettingsWindowController.caption("Hide speed"), hideSlider],
+            [SettingsWindowController.caption("Show after release"), holdSlider],
         ])
-        grid.rowSpacing = 15
+        grid.rowSpacing = 14
         grid.columnSpacing = 16
         grid.column(at: 0).xPlacement = .trailing
-        for i in 0..<8 { grid.row(at: i).yPlacement = .center }
+        for i in 0..<9 { grid.row(at: i).yPlacement = .center }
 
         let hint = NSTextField(wrappingLabelWithString:
             "Engine: Parakeet auto-detects language & punctuates (Languages row is ignored). Whisper uses the Languages whitelist. "
@@ -813,6 +837,7 @@ final class SettingsWindowController: NSWindowController {
         stylePopup.selectItem(at: app?.cfg.pillStyle == "minimal" ? 1 : 0)
         appearSlider.doubleValue = app?.cfg.animAppear ?? 0.30
         hideSlider.doubleValue = app?.cfg.animHide ?? 0.30
+        holdSlider.doubleValue = app?.cfg.holdDuration ?? 1.5
 
         micPopup.removeAllItems()
         micPopup.addItem(withTitle: "Built-in mic (recommended)")
@@ -853,6 +878,7 @@ final class SettingsWindowController: NSWindowController {
         guard let app else { return }
         app.cfg.animAppear = appearSlider.doubleValue
         app.cfg.animHide = hideSlider.doubleValue
+        app.cfg.holdDuration = holdSlider.doubleValue
         app.cfg.save(); app.applyOverlayConfig()
     }
 
@@ -936,7 +962,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) { engines.stop() }
 
     func applyOverlayConfig() {
-        overlay?.configure(minimal: cfg.pillStyle == "minimal", appear: cfg.animAppear, hide: cfg.animHide)
+        overlay?.configure(minimal: cfg.pillStyle == "minimal", appear: cfg.animAppear,
+                           hide: cfg.animHide, hold: cfg.holdDuration)
     }
 
     func setEngine(_ engine: Engine) {
@@ -1061,10 +1088,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.setIcon("🎙️")
                 let words = text.split { $0 == " " || $0 == "\n" || $0 == "\t" }.count
                 let wpm = seconds > 0.5 ? Int((Double(words) / (seconds / 60)).rounded()) : 0
-                if self.cfg.pillStyle == "full", words > 0, wpm > 0 {
-                    self.overlay?.showStats(wpm: wpm)   // reveal WPM, then fade out
+                if words == 0 {
+                    self.overlay?.setActive(false)      // no speech → fade out immediately
+                } else if self.cfg.pillStyle == "full", wpm > 0 {
+                    self.overlay?.showStats(wpm: wpm)   // WPM, linger, then fade
                 } else {
-                    self.overlay?.setActive(false)      // minimal / nothing → fade out now
+                    self.overlay?.holdThenHide()        // minimal → linger, then fade
                 }
             }
         }
