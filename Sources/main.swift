@@ -867,7 +867,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
     convenience init(app: AppDelegate) {
         let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 520, height: 840),
+            contentRect: NSRect(x: 0, y: 0, width: 640, height: 700),
             styleMask: [.titled, .closable], backing: .buffered, defer: false)
         win.title = "WisprLite Settings"
         win.isReleasedWhenClosed = false
@@ -913,7 +913,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             [SettingsWindowController.caption("Model"), modelList],
             [SettingsWindowController.caption("Dictate"), dictateChips],
             [SettingsWindowController.caption("Dictate + Enter"), enterChips],
-            [SettingsWindowController.caption("Microphone"), micPopup],
+            [SettingsWindowController.caption("Input device"), micPopup],
             [SettingsWindowController.caption(""), boostCheck],
             [SettingsWindowController.caption("Clipboard"), clipboardCheck],
             [SettingsWindowController.caption("Dictionary"), dictBtn],
@@ -924,7 +924,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             [SettingsWindowController.caption("Hide speed"), sliderRow(hideSlider, hideVal)],
             [SettingsWindowController.caption("Show after release"), sliderRow(holdSlider, holdVal)],
         ])
-        grid.rowSpacing = 13
+        grid.rowSpacing = 9
         grid.columnSpacing = 16
         grid.column(at: 0).xPlacement = .trailing
         for i in 0..<15 { grid.row(at: i).yPlacement = .center }
@@ -942,7 +942,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         let stack = NSStackView(views: [title, grid, hint, resetBtn])
         stack.orientation = .vertical
         stack.alignment = .centerX
-        stack.spacing = 18
+        stack.spacing = 12
         stack.translatesAutoresizingMaskIntoConstraints = false
 
         let content = win.contentView!
@@ -950,7 +950,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         NSLayoutConstraint.activate([
             stack.centerXAnchor.constraint(equalTo: content.centerXAnchor),
             stack.centerYAnchor.constraint(equalTo: content.centerYAnchor),
-            hint.widthAnchor.constraint(equalToConstant: 432),
+            hint.widthAnchor.constraint(equalToConstant: 560),
         ])
         win.center()
         refresh()
