@@ -93,10 +93,15 @@ struct Config: Codable {
     var leaveInClipboard: Bool = false
     // Text replacements applied to every transcript: each entry is [from, to].
     var replacements: [[String]] = []
+    // Boost/gate the mic signal before transcription (helps a quiet/distant built-in mic).
+    var boostMic: Bool = true
+    // Play a subtle sound when recording starts / stops.
+    var playSounds: Bool = false
 
     enum CodingKeys: String, CodingKey {
         case dictateChords, dictateEnterChords, inputDeviceUID
         case pillStyle, animAppear, animHide, holdDuration, leaveInClipboard, replacements
+        case boostMic, playSounds
         case dictateKeys, dictateEnterKeys  // legacy
     }
 
@@ -118,6 +123,8 @@ struct Config: Codable {
         if let x = try? c.decode(Double.self, forKey: .holdDuration) { holdDuration = x }
         if let b = try? c.decode(Bool.self, forKey: .leaveInClipboard) { leaveInClipboard = b }
         if let r = try? c.decode([[String]].self, forKey: .replacements) { replacements = r }
+        if let b = try? c.decode(Bool.self, forKey: .boostMic) { boostMic = b }
+        if let b = try? c.decode(Bool.self, forKey: .playSounds) { playSounds = b }
     }
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
@@ -130,6 +137,8 @@ struct Config: Codable {
         try c.encode(holdDuration, forKey: .holdDuration)
         try c.encode(leaveInClipboard, forKey: .leaveInClipboard)
         try c.encode(replacements, forKey: .replacements)
+        try c.encode(boostMic, forKey: .boostMic)
+        try c.encode(playSounds, forKey: .playSounds)
     }
 
     static let url = FileManager.default.homeDirectoryForCurrentUser
@@ -233,6 +242,8 @@ func deviceID(forUID uid: String) -> AudioDeviceID? {
 final class Recorder {
     let wavURL = FileManager.default.temporaryDirectory.appendingPathComponent("wispr_rec.wav")
     var deviceUID: String?          // nil → built-in mic
+    var boost = true                // AGC + noise gate before transcription
+    private var runningPeak: Float = 0.05
     private let engine = AVAudioEngine()
     private var file: AVAudioFile?
     private var converter: AVAudioConverter?
@@ -273,6 +284,7 @@ final class Recorder {
         // custom int16 format (mismatch there aborts inside AVAudioFile.write).
         writeFormat = f.processingFormat
         converter = AVAudioConverter(from: inFormat, to: f.processingFormat)
+        runningPeak = 0.05
 
         input.installTap(onBus: 0, bufferSize: 4096, format: inFormat) { [weak self] buf, _ in
             self?.handle(buf)
@@ -285,11 +297,21 @@ final class Recorder {
     private func handle(_ buffer: AVAudioPCMBuffer) {
         if let ch = buffer.floatChannelData?[0] {
             let n = Int(buffer.frameLength)
-            var sum: Float = 0
-            for i in 0..<n { sum += ch[i] * ch[i] }
+            var sum: Float = 0, peak: Float = 0
+            for i in 0..<n { let s = ch[i]; sum += s * s; peak = max(peak, abs(s)) }
             let rms = n > 0 ? (sum / Float(n)).squareRoot() : 0
             let db = 20 * log10f(max(rms, 1e-7))
             curLevel = CGFloat(max(0, min(1, (db + 50) / 50)))
+
+            if boost {
+                // AGC toward a target peak (never attenuates loud input, caps the boost) +
+                // a gentle noise gate so near-silent frames don't get amplified into the model.
+                runningPeak = max(peak, runningPeak * 0.999)
+                let gain = min(Float(6), max(Float(1), 0.5 / max(runningPeak, 0.01)))
+                let gate: Float = rms < 0.004 ? 0.15 : 1.0
+                let g = gain * gate
+                for i in 0..<n { ch[i] = max(-1, min(1, ch[i] * g)) }
+            }
         }
         guard let converter, let file, let wf = writeFormat else { return }
         let cap = AVAudioFrameCount(Double(buffer.frameLength) * wf.sampleRate / buffer.format.sampleRate + 1024)
@@ -719,6 +741,8 @@ final class SettingsWindowController: NSWindowController {
     private let holdVal = SettingsWindowController.valueLabel()
     private let clipboardCheck = NSButton(checkboxWithTitle: "Leave transcript in clipboard", target: nil, action: nil)
     private let loginCheck = NSButton(checkboxWithTitle: "Launch WisprLite at login", target: nil, action: nil)
+    private let boostCheck = NSButton(checkboxWithTitle: "Boost quiet microphone", target: nil, action: nil)
+    private let soundCheck = NSButton(checkboxWithTitle: "Play start / stop sound", target: nil, action: nil)
     private let dictBtn = NSButton(title: "Edit dictionary…", target: nil, action: nil)
 
     static func caption(_ s: String) -> NSTextField {
@@ -751,14 +775,14 @@ final class SettingsWindowController: NSWindowController {
 
     convenience init(app: AppDelegate) {
         let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 520, height: 640),
+            contentRect: NSRect(x: 0, y: 0, width: 520, height: 700),
             styleMask: [.titled, .closable], backing: .buffered, defer: false)
         win.title = "WisprLite Settings"
         win.isReleasedWhenClosed = false
         self.init(window: win)
         self.app = app
 
-        let title = NSTextField(labelWithString: "Hotkeys")
+        let title = NSTextField(labelWithString: "WisprLite Settings")
         title.font = .systemFont(ofSize: 16, weight: .semibold)
 
         for cs in [dictateChips, enterChips] {
@@ -772,6 +796,8 @@ final class SettingsWindowController: NSWindowController {
         stylePopup.target = self; stylePopup.action = #selector(pickStyle)
         clipboardCheck.target = self; clipboardCheck.action = #selector(toggleClipboard)
         loginCheck.target = self; loginCheck.action = #selector(toggleLogin)
+        boostCheck.target = self; boostCheck.action = #selector(toggleBoost)
+        soundCheck.target = self; soundCheck.action = #selector(toggleSound)
         dictBtn.target = self; dictBtn.action = #selector(openDictionary); dictBtn.bezelStyle = .rounded
         for sl in [appearSlider, hideSlider] {
             sl.minValue = 0.10; sl.maxValue = 0.55   // slow → fast (lerp rate)
@@ -788,18 +814,20 @@ final class SettingsWindowController: NSWindowController {
             [SettingsWindowController.caption("Dictate"), dictateChips],
             [SettingsWindowController.caption("Dictate + Enter"), enterChips],
             [SettingsWindowController.caption("Microphone"), micPopup],
+            [SettingsWindowController.caption(""), boostCheck],
             [SettingsWindowController.caption("Clipboard"), clipboardCheck],
-            [SettingsWindowController.caption("Startup"), loginCheck],
             [SettingsWindowController.caption("Dictionary"), dictBtn],
+            [SettingsWindowController.caption("Startup"), loginCheck],
+            [SettingsWindowController.caption("Sound"), soundCheck],
             [SettingsWindowController.caption("Overlay"), stylePopup],
             [SettingsWindowController.caption("Appear speed"), sliderRow(appearSlider, appearVal)],
             [SettingsWindowController.caption("Hide speed"), sliderRow(hideSlider, hideVal)],
             [SettingsWindowController.caption("Show after release"), sliderRow(holdSlider, holdVal)],
         ])
-        grid.rowSpacing = 14
+        grid.rowSpacing = 13
         grid.columnSpacing = 16
         grid.column(at: 0).xPlacement = .trailing
-        for i in 0..<10 { grid.row(at: i).yPlacement = .center }
+        for i in 0..<12 { grid.row(at: i).yPlacement = .center }
 
         let hint = NSTextField(wrappingLabelWithString:
             "Hotkeys: add modifier combos (⌥, ⌘⇧, ⌃⌥, Fn…) — any starts dictation; “Dictate + Enter” also presses Return. "
@@ -861,6 +889,8 @@ final class SettingsWindowController: NSWindowController {
         holdSlider.doubleValue = app?.cfg.holdDuration ?? 1.5
         clipboardCheck.state = (app?.cfg.leaveInClipboard ?? false) ? .on : .off
         loginCheck.state = (SMAppService.mainApp.status == .enabled) ? .on : .off
+        boostCheck.state = (app?.cfg.boostMic ?? true) ? .on : .off
+        soundCheck.state = (app?.cfg.playSounds ?? false) ? .on : .off
         updateAnimLabels()
 
         micPopup.removeAllItems()
@@ -886,12 +916,30 @@ final class SettingsWindowController: NSWindowController {
         app.recorder.deviceUID = uid
     }
 
-    @objc func resetDefaults() { app?.resetConfig() }
+    @objc func resetDefaults() {
+        let a = NSAlert()
+        a.messageText = "Reset all settings to defaults?"
+        a.informativeText = "Hotkeys, microphone, overlay and other preferences will be restored."
+        a.addButton(withTitle: "Reset")
+        a.addButton(withTitle: "Cancel")
+        if a.runModal() == .alertFirstButtonReturn { app?.resetConfig() }
+    }
 
     @objc func openDictionary() { app?.openDict() }
 
     @objc func toggleClipboard(_ sender: NSButton) {
         app?.cfg.leaveInClipboard = (sender.state == .on)
+        app?.cfg.save()
+    }
+
+    @objc func toggleBoost(_ sender: NSButton) {
+        app?.cfg.boostMic = (sender.state == .on)
+        app?.cfg.save()
+        app?.recorder.boost = (sender.state == .on)
+    }
+
+    @objc func toggleSound(_ sender: NSButton) {
+        app?.cfg.playSounds = (sender.state == .on)
         app?.cfg.save()
     }
 
@@ -1053,12 +1101,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .filter { $0 != .current }
         if !others.isEmpty { others.first?.activate(); NSApp.terminate(nil); return }
 
-        setIcon("⏳")                         // warming up until the model loads
+        setState(.warming)                         // warming up until the model loads
         buildMenu()
         overlay = PillOverlay(levelProvider: { [weak self] in self?.recorder.level() ?? 0 })
         applyOverlayConfig()
         recorder.deviceUID = cfg.inputDeviceUID
-        parakeet.onReady = { [weak self] in self?.setIcon("🎙️") }
+        recorder.boost = cfg.boostMic
+        parakeet.onReady = { [weak self] in self?.setState(.ready) }
         parakeet.start()
         checkPermissions()
         installEventTap()
@@ -1075,6 +1124,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         cfg = Config()                      // all defaults
         cfg.save()
         recorder.deviceUID = cfg.inputDeviceUID
+        recorder.boost = cfg.boostMic
         applyOverlayConfig()
         buildMenu()
         settingsWC?.refresh()
@@ -1165,7 +1215,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         pendingEnter = enter
         activeChord = chord
         recordStart = Date()
-        setIcon(enter ? "🔴↵" : "🔴")
+        setState(.recording)
+        if cfg.playSounds { NSSound(named: "Pop")?.play() }
         overlay?.setActive(true)
         recorder.start()
     }
@@ -1176,9 +1227,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         activeChord = nil
         let enter = pendingEnter
         // Keep the pill open through transcription so we can reveal WPM inline on the right.
-        setIcon("⏳")
+        setState(.warming)
         overlay?.stopTimer()   // freeze the live timer; WPM replaces it after transcription
-        guard let wav = recorder.stop() else { overlay?.setActive(false); setIcon("🎙️"); return }
+        guard let wav = recorder.stop() else { overlay?.setActive(false); setState(.ready); return }
         let seconds = Date().timeIntervalSince(recordStart)
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
@@ -1193,8 +1244,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let text = applyReplacements(raw, self.cfg.replacements)
                 logf("TRANSCRIPT len=\(text.count) trusted=\(AXIsProcessTrusted()) text='\(text.prefix(80))'")
                 self.paster.paste(text, pressEnter: enter, keepInClipboard: self.cfg.leaveInClipboard)
-                self.setIcon("🎙️")
-                if !text.isEmpty { self.history.add(text); self.buildMenu() }
+                self.setState(.ready)
+                if !text.isEmpty {
+                    if self.cfg.playSounds { NSSound(named: "Tink")?.play() }
+                    self.history.add(text); self.buildMenu()
+                }
                 let words = text.split { $0 == " " || $0 == "\n" || $0 == "\t" }.count
                 let wpm = seconds > 0.5 ? Int((Double(words) / (seconds / 60)).rounded()) : 0
                 if words == 0 {
@@ -1209,16 +1263,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func flashError() {
-        setIcon("⚠️")
+        setState(.error)
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) { [weak self] in
-            self?.setIcon(self?.parakeet.ready == true ? "🎙️" : "⏳")
+            self?.setState(self?.parakeet.ready == true ? .ready : .warming)
         }
     }
 
-    func setIcon(_ s: String) { DispatchQueue.main.async { self.statusItem.button?.title = s } }
+    enum IconState { case warming, ready, recording, processing, error }
+    func setState(_ s: IconState) {
+        DispatchQueue.main.async {
+            guard let btn = self.statusItem.button else { return }
+            let name: String, tint: NSColor?
+            switch s {
+            case .warming:    name = "hourglass";                    tint = nil
+            case .ready:      name = "mic";                          tint = nil
+            case .recording:  name = "mic.fill";                     tint = .systemRed
+            case .processing: name = "waveform";                     tint = nil
+            case .error:      name = "exclamationmark.triangle.fill"; tint = .systemOrange
+            }
+            let img = NSImage(systemSymbolName: name, accessibilityDescription: "WisprLite")
+            img?.isTemplate = (tint == nil)          // template adapts to the menubar theme
+            btn.image = img
+            btn.contentTintColor = tint
+            btn.title = ""
+        }
+    }
 
     func buildMenu() {
         let menu = NSMenu()
+        let ver = menu.addItem(withTitle: "WisprLite 0.1 · Parakeet v3", action: nil, keyEquivalent: "")
+        ver.isEnabled = false
+        menu.addItem(.separator())
         let names = { (cs: [Int]) in cs.isEmpty ? "—" : cs.map { Mods(rawValue: $0).name }.joined(separator: ", ") }
         menu.addItem(withTitle: "Dictate:  \(names(cfg.dictateChords))", action: nil, keyEquivalent: "")
         menu.addItem(withTitle: "Dictate + Enter:  \(names(cfg.dictateEnterChords))", action: nil, keyEquivalent: "")
