@@ -701,18 +701,16 @@ final class SettingsWindowController: NSWindowController {
 
         let stack = NSStackView(views: [title, grid, hint, resetBtn])
         stack.orientation = .vertical
-        stack.alignment = .leading
+        stack.alignment = .centerX
         stack.spacing = 18
         stack.translatesAutoresizingMaskIntoConstraints = false
-        stack.edgeInsets = NSEdgeInsets(top: 24, left: 24, bottom: 24, right: 24)
 
         let content = win.contentView!
         content.addSubview(stack)
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-            stack.topAnchor.constraint(equalTo: content.topAnchor),
-            hint.widthAnchor.constraint(lessThanOrEqualToConstant: 432),
+            stack.centerXAnchor.constraint(equalTo: content.centerXAnchor),
+            stack.centerYAnchor.constraint(equalTo: content.centerYAnchor),
+            hint.widthAnchor.constraint(equalToConstant: 432),
         ])
         win.center()
         refresh()
