@@ -1,18 +1,23 @@
 # WisprLite
 
 Local push-to-talk dictation for macOS (Apple Silicon). Hold a modifier combo, speak,
-release — your speech is transcribed on-device with whisper.cpp and pasted where the cursor is.
+release — your speech is transcribed on-device and pasted where the cursor is.
 
 - **Local & private** — audio never leaves the machine
-- **Fast** — model stays resident in `whisper-server` (loads once, ~0.4s/utterance with turbo)
+- **Two engines** (switchable in Settings):
+  - **Parakeet v3** (default) — parakeet.cpp, ~0.1s/utterance, multilingual auto-detect + automatic punctuation
+  - **Whisper Large v3 Turbo** — whisper.cpp, with a language whitelist, VAD, and domain prompt
 - **Push-to-talk** — bind any modifier combo (⌥, ⌘⇧, ⌃⌥, Fn…); a second combo also presses Return
+- **Built-in mic capture** so Bluetooth headphones stay in high-quality output mode
 - **Floating waveform pill** at the bottom of the screen, reacting to your voice
 
 ## Requirements
 
 - Apple Silicon Mac, macOS 13+
-- Xcode command-line tools (`swiftc`)
-- `brew install whisper-cpp`
+- Xcode command-line tools (`swiftc`), `cmake`, `git`
+- `brew install whisper-cpp` (for the Whisper engine)
+
+`build.sh` clones and builds `parakeet.cpp` (with Metal) and downloads all models on first run.
 
 ## Build & run
 

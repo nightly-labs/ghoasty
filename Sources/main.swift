@@ -1,14 +1,27 @@
 import AppKit
 import AVFoundation
 import ApplicationServices
+import CoreAudio
 
 // WisprLite — push-to-talk local dictation.
 // Hold a bound modifier to record, release to transcribe (whisper.cpp) and paste.
 // Two bindings: plain dictate, and dictate+Enter (presses Return after pasting).
 
-let MODEL_PATH = (Bundle.main.bundlePath as NSString)
-    .deletingLastPathComponent + "/models/ggml-large-v3-turbo.bin"
+let ROOT_DIR = (Bundle.main.bundlePath as NSString).deletingLastPathComponent
+let MODELS_DIR = ROOT_DIR + "/models"
+func modelPath(_ file: String) -> String { MODELS_DIR + "/" + file }
+let VAD_PATH = modelPath("ggml-silero-v5.1.2.bin")
+
+// ---- Transcription engines ----
 let WHISPER_CLI = "/opt/homebrew/bin/whisper-cli"
+let WHISPER_SERVER_BIN = "/opt/homebrew/bin/whisper-server"
+let WHISPER_MODEL = modelPath("ggml-large-v3-turbo.bin")
+let PARAKEET_SERVER_BIN = ROOT_DIR + "/parakeet.cpp/build/examples/server/parakeet-server"
+let PARAKEET_MODEL = modelPath("parakeet-tdt-0.6b-v3-f16.gguf")
+
+// Parakeet v3 (parakeet.cpp): ~0.1s/utterance, multilingual auto-detect, auto punctuation.
+// Whisper (whisper-server): slower, needs the language whitelist + VAD workarounds.
+enum Engine: String { case parakeet, whisper }
 
 let LOG_URL = FileManager.default.homeDirectoryForCurrentUser
     .appendingPathComponent("WisprLite/wispr.log")
@@ -65,14 +78,44 @@ func chord(fromLegacyKeyCode k: UInt16) -> Int {
     }
 }
 
+// ---- Languages the whitelist UI offers. (code, whisper's english name, UI label) ----
+let SUPPORTED_LANGS: [(code: String, name: String, label: String)] = [
+    ("pl", "polish", "Polski"),
+    ("en", "english", "English"),
+    ("de", "german", "Deutsch"),
+    ("uk", "ukrainian", "Українська"),
+    ("ru", "russian", "Русский"),
+    ("es", "spanish", "Español"),
+    ("fr", "french", "Français"),
+    ("it", "italian", "Italiano"),
+    ("pt", "portuguese", "Português"),
+    ("cs", "czech", "Čeština"),
+    ("nl", "dutch", "Nederlands"),
+    ("ja", "japanese", "日本語"),
+    ("zh", "chinese", "中文"),
+]
+func langLabel(_ code: String) -> String { SUPPORTED_LANGS.first { $0.code == code }?.label ?? code }
+func codeForWhisperName(_ name: String) -> String? {
+    SUPPORTED_LANGS.first { $0.name == name.lowercased() }?.code
+}
+
 // ---- Config persisted to ~/.wisprlite/config.json ----
 struct Config: Codable {
     // Each chord is a Mods rawValue (a set of modifiers held together).
     var dictateChords: [Int] = [Mods.opt.rawValue]        // ⌥
     var dictateEnterChords: [Int] = [Mods.cmd.rawValue]   // ⌘
+    // Allowed transcription languages. 1 → forced; >1 → auto limited to these; empty → full auto.
+    var languages: [String] = ["pl"]
+    // Initial prompt biases whisper toward your domain terms / names. Editable here.
+    var prompt: String = "Transkrypcja po polsku. Programowanie, API, frontend, backend, deploy, commit, TypeScript, Rust, Solana."
+    // Preferred input device UID. nil → built-in mic (keeps Bluetooth output in A2DP).
+    var inputDeviceUID: String? = nil
+    // Transcription engine.
+    var engine: String = Engine.parakeet.rawValue
 
     enum CodingKeys: String, CodingKey {
-        case dictateChords, dictateEnterChords, dictateKeys, dictateEnterKeys  // last two = legacy
+        case dictateChords, dictateEnterChords, languages, prompt, inputDeviceUID, engine
+        case dictateKeys, dictateEnterKeys  // legacy
     }
 
     init() {}
@@ -86,11 +129,19 @@ struct Config: Codable {
         else if let ks = try? c.decode([UInt16].self, forKey: .dictateEnterKeys) {
             dictateEnterChords = ks.map(chord(fromLegacyKeyCode:)).filter { $0 != 0 }
         }
+        if let l = try? c.decode([String].self, forKey: .languages) { languages = l }
+        if let p = try? c.decode(String.self, forKey: .prompt) { prompt = p }
+        if let u = try? c.decode(String?.self, forKey: .inputDeviceUID) { inputDeviceUID = u }
+        if let e = try? c.decode(String.self, forKey: .engine) { engine = e }
     }
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(dictateChords, forKey: .dictateChords)
         try c.encode(dictateEnterChords, forKey: .dictateEnterChords)
+        try c.encode(languages, forKey: .languages)
+        try c.encode(prompt, forKey: .prompt)
+        try c.encode(inputDeviceUID, forKey: .inputDeviceUID)
+        try c.encode(engine, forKey: .engine)
     }
 
     static let url = FileManager.default.homeDirectoryForCurrentUser
@@ -109,103 +160,263 @@ struct Config: Codable {
     }
 }
 
+// ---- Core Audio device helpers ----
+func allAudioDevices() -> [AudioDeviceID] {
+    var addr = AudioObjectPropertyAddress(
+        mSelector: kAudioHardwarePropertyDevices,
+        mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+    var size: UInt32 = 0
+    guard AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size) == noErr
+    else { return [] }
+    var devices = [AudioDeviceID](repeating: 0, count: Int(size) / MemoryLayout<AudioDeviceID>.size)
+    guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &devices) == noErr
+    else { return [] }
+    return devices
+}
+
+func deviceHasInput(_ dev: AudioDeviceID) -> Bool {
+    var addr = AudioObjectPropertyAddress(
+        mSelector: kAudioDevicePropertyStreams,
+        mScope: kAudioObjectPropertyScopeInput, mElement: kAudioObjectPropertyElementMain)
+    var size: UInt32 = 0
+    AudioObjectGetPropertyDataSize(dev, &addr, 0, nil, &size)
+    return size > 0
+}
+
+func deviceTransport(_ dev: AudioDeviceID) -> UInt32 {
+    var t: UInt32 = 0
+    var size = UInt32(MemoryLayout<UInt32>.size)
+    var addr = AudioObjectPropertyAddress(
+        mSelector: kAudioDevicePropertyTransportType,
+        mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+    AudioObjectGetPropertyData(dev, &addr, 0, nil, &size, &t)
+    return t
+}
+
+func deviceStringProp(_ dev: AudioDeviceID, _ selector: AudioObjectPropertySelector) -> String? {
+    var addr = AudioObjectPropertyAddress(
+        mSelector: selector,
+        mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+    var str: CFString? = nil
+    var size = UInt32(MemoryLayout<CFString?>.size)
+    let st = withUnsafeMutablePointer(to: &str) {
+        AudioObjectGetPropertyData(dev, &addr, 0, nil, &size, $0)
+    }
+    return st == noErr ? (str as String?) : nil
+}
+func deviceUID(_ dev: AudioDeviceID) -> String? { deviceStringProp(dev, kAudioDevicePropertyDeviceUID) }
+func deviceName(_ dev: AudioDeviceID) -> String { deviceStringProp(dev, kAudioObjectPropertyName) ?? "Unknown" }
+
+// Built-in mic — default so we never open the Bluetooth headset's mic (which would force
+// AirPods from high-quality A2DP playback into low-quality HFP call mode).
+func builtInInputDeviceID() -> AudioDeviceID? {
+    allAudioDevices().first { deviceHasInput($0) && deviceTransport($0) == kAudioDeviceTransportTypeBuiltIn }
+}
+func inputDeviceList() -> [(uid: String, name: String)] {
+    allAudioDevices().filter(deviceHasInput).compactMap { d in deviceUID(d).map { (uid: $0, name: deviceName(d)) } }
+}
+func deviceID(forUID uid: String) -> AudioDeviceID? {
+    allAudioDevices().first { deviceUID($0) == uid }
+}
+
 final class Recorder {
-    private var recorder: AVAudioRecorder?
     let wavURL = FileManager.default.temporaryDirectory.appendingPathComponent("wispr_rec.wav")
+    var deviceUID: String?          // nil → built-in mic
+    private let engine = AVAudioEngine()
+    private var file: AVAudioFile?
+    private var converter: AVAudioConverter?
+    private var writeFormat: AVAudioFormat?   // = file.processingFormat (what write() expects)
+    private var curLevel: CGFloat = 0
+    private var running = false
+
+    // On-disk WAV: 16 kHz mono PCM16 — what whisper wants.
+    private let fileSettings: [String: Any] = [
+        AVFormatIDKey: Int(kAudioFormatLinearPCM),
+        AVSampleRateKey: 16000.0,
+        AVNumberOfChannelsKey: 1,
+        AVLinearPCMBitDepthKey: 16,
+        AVLinearPCMIsFloatKey: false,
+        AVLinearPCMIsBigEndianKey: false,
+    ]
 
     func start() {
-        let settings: [String: Any] = [
-            AVFormatIDKey: Int(kAudioFormatLinearPCM),
-            AVSampleRateKey: 16000.0,
-            AVNumberOfChannelsKey: 1,
-            AVLinearPCMBitDepthKey: 16,
-            AVLinearPCMIsFloatKey: false,
-            AVLinearPCMIsBigEndianKey: false,
-        ]
-        do {
-            recorder = try AVAudioRecorder(url: wavURL, settings: settings)
-            recorder?.isMeteringEnabled = true
-            recorder?.record()
-        } catch { NSLog("record start failed: \(error)") }
+        let input = engine.inputNode
+        // Chosen device, else built-in mic (keeps Bluetooth output in A2DP).
+        let devID = deviceUID.flatMap(deviceID(forUID:)) ?? builtInInputDeviceID()
+        if let dev = devID, let unit = input.audioUnit {
+            var d = dev
+            AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice,
+                                 kAudioUnitScope_Global, 0, &d, UInt32(MemoryLayout<AudioDeviceID>.size))
+        } else {
+            logf("no capture device resolved — using default input")
+        }
+
+        let inFormat = input.inputFormat(forBus: 0)
+        logf("recording @ \(Int(inFormat.sampleRate))Hz (built-in mic: \(builtInInputDeviceID() != nil))")
+        guard inFormat.sampleRate > 0 else { logf("no input format"); return }
+        guard let f = try? AVAudioFile(forWriting: wavURL, settings: fileSettings) else {
+            logf("could not open output file"); return
+        }
+        file = f
+        // write() requires buffers in the file's processingFormat — convert to THAT, not a
+        // custom int16 format (mismatch there aborts inside AVAudioFile.write).
+        writeFormat = f.processingFormat
+        converter = AVAudioConverter(from: inFormat, to: f.processingFormat)
+
+        input.installTap(onBus: 0, bufferSize: 4096, format: inFormat) { [weak self] buf, _ in
+            self?.handle(buf)
+        }
+        engine.prepare()
+        do { try engine.start(); running = true }
+        catch { logf("engine start failed: \(error)") }
     }
+
+    private func handle(_ buffer: AVAudioPCMBuffer) {
+        if let ch = buffer.floatChannelData?[0] {
+            let n = Int(buffer.frameLength)
+            var sum: Float = 0
+            for i in 0..<n { sum += ch[i] * ch[i] }
+            let rms = n > 0 ? (sum / Float(n)).squareRoot() : 0
+            let db = 20 * log10f(max(rms, 1e-7))
+            curLevel = CGFloat(max(0, min(1, (db + 50) / 50)))
+        }
+        guard let converter, let file, let wf = writeFormat else { return }
+        let cap = AVAudioFrameCount(Double(buffer.frameLength) * wf.sampleRate / buffer.format.sampleRate + 1024)
+        guard let outBuf = AVAudioPCMBuffer(pcmFormat: wf, frameCapacity: cap) else { return }
+        var err: NSError?
+        var fed = false
+        converter.convert(to: outBuf, error: &err) { _, status in
+            if fed { status.pointee = .noDataNow; return nil }
+            fed = true; status.pointee = .haveData; return buffer
+        }
+        if outBuf.frameLength > 0 { try? file.write(from: outBuf) }
+    }
+
     func stop() -> URL? {
-        guard let r = recorder, r.isRecording else { return nil }
-        r.stop(); recorder = nil
+        guard running else { return nil }
+        engine.inputNode.removeTap(onBus: 0)
+        engine.stop()
+        file = nil; converter = nil; writeFormat = nil; running = false; curLevel = 0
         return wavURL
     }
-    /// Current mic loudness, normalized 0…1.
-    func level() -> CGFloat {
-        guard let r = recorder, r.isRecording else { return 0 }
-        r.updateMeters()
-        let db = r.averagePower(forChannel: 0)   // -160…0 dB
-        return CGFloat(max(0, min(1, (db + 50) / 50)))
-    }
+    func level() -> CGFloat { running ? curLevel : 0 }
 }
 
 extension Data { mutating func appendStr(_ s: String) { if let d = s.data(using: .utf8) { append(d) } } }
 
-// Keeps the 3.1GB model resident in whisper-server so it loads ONCE, not per dictation.
-// Model load is ~2.2s; inference is ~0.2s — so persistent server ≈ 10x faster per utterance.
-final class WhisperServer {
+// Runs whichever engine's local HTTP server is selected, model resident. Only one runs at
+// a time (saves RAM); switching stops the old and starts the new.
+final class EngineManager {
     private var proc: Process?
-    static let endpoint = URL(string: "http://127.0.0.1:8080/inference")!
+    private(set) var engine: Engine = .parakeet
 
-    func start() {
+    func start(_ engine: Engine, prompt: String) {
+        self.engine = engine
         let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/whisper-server")
-        p.arguments = ["-m", MODEL_PATH, "--host", "127.0.0.1", "--port", "8080", "-l", "auto"]
         p.standardOutput = FileHandle.nullDevice
         p.standardError = FileHandle.nullDevice
-        do { try p.run(); proc = p; logf("whisper-server starting (loading model once)") }
-        catch { logf("whisper-server failed to start: \(error)") }
+        switch engine {
+        case .parakeet:
+            guard FileManager.default.fileExists(atPath: PARAKEET_SERVER_BIN) else {
+                logf("parakeet-server missing — run build.sh"); return
+            }
+            p.executableURL = URL(fileURLWithPath: PARAKEET_SERVER_BIN)
+            p.arguments = ["--model", PARAKEET_MODEL, "--host", "127.0.0.1", "--port", "8090"]
+        case .whisper:
+            p.executableURL = URL(fileURLWithPath: WHISPER_SERVER_BIN)
+            var args = ["-m", WHISPER_MODEL, "--host", "127.0.0.1", "--port", "8080", "-l", "auto"]
+            if FileManager.default.fileExists(atPath: VAD_PATH) { args += ["--vad", "--vad-model", VAD_PATH] }
+            if !prompt.isEmpty { args += ["--prompt", prompt, "--carry-initial-prompt"] }
+            p.arguments = args
+        }
+        do { try p.run(); proc = p; logf("engine \(engine.rawValue) starting") }
+        catch { logf("engine \(engine.rawValue) failed to start: \(error)") }
     }
-    func stop() { proc?.terminate() }
+
+    func stop() { proc?.terminate(); proc?.waitUntilExit(); proc = nil }
+
+    func switchTo(_ engine: Engine, prompt: String) { stop(); start(engine, prompt: prompt) }
 }
 
 final class Transcriber {
-    // Fast path: POST audio to the always-loaded server. Falls back to a one-shot CLI run.
-    func transcribe(_ wav: URL) -> String {
-        let viaServer = serverTranscribe(wav)
-        return viaServer.isEmpty ? cliTranscribe(wav) : viaServer
+    static let whisperEndpoint = URL(string: "http://127.0.0.1:8080/inference")!
+    static let parakeetEndpoint = URL(string: "http://127.0.0.1:8090/v1/audio/transcriptions")!
+
+    func transcribe(_ wav: URL, engine: Engine, languages: [String]) -> String {
+        switch engine {
+        case .parakeet: return parakeetTranscribe(wav)
+        case .whisper:  return whisperTranscribe(wav, languages: languages)
+        }
     }
 
-    private func serverTranscribe(_ wav: URL) -> String {
-        guard let audio = try? Data(contentsOf: wav) else { return "" }
+    // Parakeet: multilingual auto-detect + punctuation built in — no whitelist/VAD needed.
+    private func parakeetTranscribe(_ wav: URL) -> String {
+        let r = post(Transcriber.parakeetEndpoint, wav: wav,
+                     fields: ["language": "auto", "response_format": "text"], verbose: false)
+        return r.text ?? ""
+    }
+
+    // Whisper: language whitelist (1 → forced; >1 → auto confined to the set; empty → full auto).
+    private func whisperTranscribe(_ wav: URL, languages: [String]) -> String {
+        let primary = languages.first ?? "auto"
+        if languages.count <= 1 {
+            let r = post(Transcriber.whisperEndpoint, wav: wav,
+                         fields: ["language": primary, "response_format": "text"], verbose: false)
+            return r.text ?? cliTranscribe(wav, language: primary)
+        }
+        let r = post(Transcriber.whisperEndpoint, wav: wav,
+                     fields: ["language": "auto", "response_format": "verbose_json"], verbose: true)
+        guard let text = r.text else { return cliTranscribe(wav, language: primary) }
+        if text.isEmpty { return "" }                       // VAD: no speech
+        if let d = codeForWhisperName(r.detectedLang), languages.contains(d) { return text }
+        logf("lang '\(r.detectedLang)' outside whitelist → redo as \(primary)")
+        return post(Transcriber.whisperEndpoint, wav: wav,
+                    fields: ["language": primary, "response_format": "text"], verbose: false).text ?? ""
+    }
+
+    // Shared OpenAI-style multipart POST. text == nil → request failed.
+    private func post(_ url: URL, wav: URL, fields: [String: String], verbose: Bool)
+        -> (text: String?, detectedLang: String) {
+        guard let audio = try? Data(contentsOf: wav) else { return (nil, "") }
         let boundary = "WisprLiteBoundary7MA4YWxkTrZu0gW"
         var body = Data()
         body.appendStr("--\(boundary)\r\n")
         body.appendStr("Content-Disposition: form-data; name=\"file\"; filename=\"a.wav\"\r\n")
         body.appendStr("Content-Type: audio/wav\r\n\r\n")
         body.append(audio)
-        body.appendStr("\r\n--\(boundary)\r\n")
-        body.appendStr("Content-Disposition: form-data; name=\"response_format\"\r\n\r\ntext\r\n")
-        body.appendStr("--\(boundary)\r\n")
-        // Force Polish — auto-detect drifts to French/English on short clips.
-        body.appendStr("Content-Disposition: form-data; name=\"language\"\r\n\r\npl\r\n")
-        body.appendStr("--\(boundary)--\r\n")
+        for (k, v) in fields {
+            body.appendStr("\r\n--\(boundary)\r\n")
+            body.appendStr("Content-Disposition: form-data; name=\"\(k)\"\r\n\r\n\(v)")
+        }
+        body.appendStr("\r\n--\(boundary)--\r\n")
 
-        var req = URLRequest(url: WhisperServer.endpoint)
+        var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.timeoutInterval = 30
         req.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
         req.httpBody = body
 
         let sem = DispatchSemaphore(value: 0)
-        var result = ""
-        URLSession.shared.dataTask(with: req) { data, _, _ in
-            if let data, let s = String(data: data, encoding: .utf8) {
-                result = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        var out: (text: String?, detectedLang: String) = (nil, "")
+        URLSession.shared.dataTask(with: req) { data, resp, _ in
+            defer { sem.signal() }
+            if let http = resp as? HTTPURLResponse, !(200...299).contains(http.statusCode) { return }
+            guard let data else { return }
+            if verbose, let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                let text = (obj["text"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                out = (text, obj["language"] as? String ?? "")
+            } else if let s = String(data: data, encoding: .utf8) {
+                out = (s.trimmingCharacters(in: .whitespacesAndNewlines), "")
             }
-            sem.signal()
         }.resume()
         sem.wait()
-        return result
+        return out
     }
 
-    private func cliTranscribe(_ wav: URL) -> String {
+    private func cliTranscribe(_ wav: URL, language: String) -> String {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: WHISPER_CLI)
-        p.arguments = ["-m", MODEL_PATH, "-f", wav.path, "-l", "pl", "-nt", "-np"]
+        p.arguments = ["-m", WHISPER_MODEL, "-f", wav.path, "-l", language.isEmpty ? "auto" : language, "-nt", "-np"]
         let out = Pipe()
         p.standardOutput = out
         p.standardError = Pipe()
@@ -350,8 +561,12 @@ final class SettingsWindowController: NSWindowController {
     weak var app: AppDelegate?
     private let dictateChips = NSStackView()
     private let enterChips = NSStackView()
+    private let langChips = NSStackView()
     private let dictateAddBtn = NSButton(title: "＋ Add key", target: nil, action: nil)
     private let enterAddBtn = NSButton(title: "＋ Add key", target: nil, action: nil)
+    private let addLangBtn = NSButton(title: "＋ Add language", target: nil, action: nil)
+    private let micPopup = NSPopUpButton()
+    private let enginePopup = NSPopUpButton()
 
     static func caption(_ s: String) -> NSTextField {
         let l = NSTextField(labelWithString: s)
@@ -362,7 +577,7 @@ final class SettingsWindowController: NSWindowController {
 
     convenience init(app: AppDelegate) {
         let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 480, height: 250),
+            contentRect: NSRect(x: 0, y: 0, width: 520, height: 440),
             styleMask: [.titled, .closable], backing: .buffered, defer: false)
         win.title = "WisprLite Settings"
         win.isReleasedWhenClosed = false
@@ -372,28 +587,33 @@ final class SettingsWindowController: NSWindowController {
         let title = NSTextField(labelWithString: "Hotkeys")
         title.font = .systemFont(ofSize: 16, weight: .semibold)
 
-        for cs in [dictateChips, enterChips] {
+        for cs in [dictateChips, enterChips, langChips] {
             cs.orientation = .horizontal; cs.spacing = 8; cs.alignment = .centerY
         }
         dictateAddBtn.target = self; dictateAddBtn.action = #selector(recordDictate)
         enterAddBtn.target = self; enterAddBtn.action = #selector(recordEnter)
-        dictateAddBtn.bezelStyle = .rounded; enterAddBtn.bezelStyle = .rounded
+        addLangBtn.target = self; addLangBtn.action = #selector(addLanguage)
+        dictateAddBtn.bezelStyle = .rounded; enterAddBtn.bezelStyle = .rounded; addLangBtn.bezelStyle = .rounded
         dictateAddBtn.title = "＋ Add combo"; enterAddBtn.title = "＋ Add combo"
+        micPopup.target = self; micPopup.action = #selector(pickMic)
+        enginePopup.target = self; enginePopup.action = #selector(pickEngine)
 
         let grid = NSGridView(views: [
+            [SettingsWindowController.caption("Engine"), enginePopup],
             [SettingsWindowController.caption("Dictate"), dictateChips],
             [SettingsWindowController.caption("Dictate + Enter"), enterChips],
+            [SettingsWindowController.caption("Languages"), langChips],
+            [SettingsWindowController.caption("Microphone"), micPopup],
         ])
         grid.rowSpacing = 16
         grid.columnSpacing = 16
         grid.column(at: 0).xPlacement = .trailing
-        grid.row(at: 0).yPlacement = .center
-        grid.row(at: 1).yPlacement = .center
+        for i in 0..<5 { grid.row(at: i).yPlacement = .center }
 
         let hint = NSTextField(wrappingLabelWithString:
-            "Add one or more modifier combos (⌥, ⌘⇧, ⌃⌥, Fn…) per mode — any of them starts dictation. "
-            + "Click “Add combo”, then press & hold the combination, then release. Click a combo to remove it. "
-            + "“Dictate + Enter” also presses Return after pasting.")
+            "Engine: Parakeet auto-detects language & punctuates (Languages row is ignored). Whisper uses the Languages whitelist. "
+            + "Hotkeys: add modifier combos (⌥, ⌘⇧, ⌃⌥, Fn…) — any starts dictation; “Dictate + Enter” also presses Return. "
+            + "Microphone: built-in keeps Bluetooth output in high quality. Click a chip to remove it.")
         hint.font = .systemFont(ofSize: 11)
         hint.textColor = .tertiaryLabelColor
 
@@ -437,6 +657,76 @@ final class SettingsWindowController: NSWindowController {
         enterAddBtn.title = capturing == .dictateEnter ? "Press a combo…" : "＋ Add combo"
         enterAddBtn.isEnabled = capturing == .none || capturing == .dictateEnter
         enterChips.addArrangedSubview(enterAddBtn)
+
+        for v in langChips.arrangedSubviews { langChips.removeArrangedSubview(v); v.removeFromSuperview() }
+        for code in app?.cfg.languages ?? [] { langChips.addArrangedSubview(langChip(code)) }
+        langChips.addArrangedSubview(addLangBtn)
+
+        enginePopup.removeAllItems()
+        enginePopup.addItem(withTitle: "Parakeet v3 — fast, multilingual (recommended)")
+        enginePopup.lastItem?.representedObject = Engine.parakeet.rawValue
+        enginePopup.addItem(withTitle: "Whisper Large v3 Turbo")
+        enginePopup.lastItem?.representedObject = Engine.whisper.rawValue
+        enginePopup.selectItem(at: app?.cfg.engine == Engine.whisper.rawValue ? 1 : 0)
+
+        micPopup.removeAllItems()
+        micPopup.addItem(withTitle: "Built-in mic (recommended)")
+        micPopup.lastItem?.representedObject = nil
+        let devices = inputDeviceList()
+        for d in devices {
+            micPopup.addItem(withTitle: d.name)
+            micPopup.lastItem?.representedObject = d.uid
+        }
+        if let uid = app?.cfg.inputDeviceUID, let idx = devices.firstIndex(where: { $0.uid == uid }) {
+            micPopup.selectItem(at: idx + 1)
+        } else {
+            micPopup.selectItem(at: 0)
+        }
+    }
+
+    @objc func pickMic(_ sender: NSPopUpButton) {
+        guard let app else { return }
+        let uid = sender.selectedItem?.representedObject as? String
+        app.cfg.inputDeviceUID = uid
+        app.cfg.save()
+        app.recorder.deviceUID = uid
+    }
+
+    @objc func pickEngine(_ sender: NSPopUpButton) {
+        guard let raw = sender.selectedItem?.representedObject as? String,
+              let e = Engine(rawValue: raw) else { return }
+        app?.setEngine(e)
+    }
+
+    private func langChip(_ code: String) -> NSButton {
+        let b = NSButton(title: "\(langLabel(code))  ✕", target: self, action: #selector(removeLang(_:)))
+        b.bezelStyle = .rounded
+        b.identifier = NSUserInterfaceItemIdentifier(code)
+        return b
+    }
+
+    @objc func addLanguage() {
+        let existing = Set(app?.cfg.languages ?? [])
+        let menu = NSMenu()
+        for l in SUPPORTED_LANGS where !existing.contains(l.code) {
+            let it = menu.addItem(withTitle: l.label, action: #selector(pickLang(_:)), keyEquivalent: "")
+            it.target = self
+            it.representedObject = l.code
+        }
+        if menu.items.isEmpty { menu.addItem(withTitle: "(all added)", action: nil, keyEquivalent: "") }
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: addLangBtn.bounds.height + 4), in: addLangBtn)
+    }
+
+    @objc func pickLang(_ sender: NSMenuItem) {
+        guard let code = sender.representedObject as? String, let app else { return }
+        if !app.cfg.languages.contains(code) { app.cfg.languages.append(code) }
+        app.cfg.save(); app.buildMenu(); refresh()
+    }
+
+    @objc func removeLang(_ sender: NSButton) {
+        guard let code = sender.identifier?.rawValue, let app else { return }
+        app.cfg.languages.removeAll { $0 == code }
+        app.cfg.save(); app.buildMenu(); refresh()
     }
 
     @objc func removeKey(_ sender: NSButton) {
@@ -462,7 +752,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let recorder = Recorder()
     let transcriber = Transcriber()
     let paster = Paster()
-    let whisper = WhisperServer()
+    let engines = EngineManager()
     var eventTap: CFMachPort?
     var cfg = Config.load()
     var isRecording = false
@@ -477,12 +767,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         setIcon("🎙️")
         buildMenu()
         overlay = PillOverlay(levelProvider: { [weak self] in self?.recorder.level() ?? 0 })
-        whisper.start()          // load model once, keep it resident (fast dictation)
+        recorder.deviceUID = cfg.inputDeviceUID
+        engines.start(Engine(rawValue: cfg.engine) ?? .parakeet, prompt: cfg.prompt)
         checkPermissions()
         installEventTap()
     }
 
-    func applicationWillTerminate(_ notification: Notification) { whisper.stop() }
+    func applicationWillTerminate(_ notification: Notification) { engines.stop() }
+
+    func setEngine(_ engine: Engine) {
+        cfg.engine = engine.rawValue
+        cfg.save()
+        buildMenu()
+        setIcon("⏳")
+        DispatchQueue.global().async {
+            self.engines.switchTo(engine, prompt: self.cfg.prompt)
+            DispatchQueue.main.async { self.setIcon("🎙️") }
+        }
+    }
 
     // Check permissions first; only prompt for the ones actually missing.
     func checkPermissions() {
@@ -581,9 +883,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         overlay?.setActive(false)
         setIcon("⏳")
         guard let wav = recorder.stop() else { setIcon("🎙️"); return }
+        let langs = cfg.languages
+        let engine = engines.engine
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
-            let text = self.transcriber.transcribe(wav)
+            let text = self.transcriber.transcribe(wav, engine: engine, languages: langs)
             DispatchQueue.main.async {
                 logf("TRANSCRIPT len=\(text.count) trusted=\(AXIsProcessTrusted()) text='\(text.prefix(80))'")
                 self.paster.paste(text, pressEnter: enter)
@@ -599,6 +903,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let names = { (cs: [Int]) in cs.isEmpty ? "—" : cs.map { Mods(rawValue: $0).name }.joined(separator: ", ") }
         menu.addItem(withTitle: "Dictate:  \(names(cfg.dictateChords))", action: nil, keyEquivalent: "")
         menu.addItem(withTitle: "Dictate + Enter:  \(names(cfg.dictateEnterChords))", action: nil, keyEquivalent: "")
+        let langs = cfg.languages.isEmpty ? "auto (all)" : cfg.languages.map(langLabel).joined(separator: ", ")
+        menu.addItem(withTitle: "Languages:  \(langs)", action: nil, keyEquivalent: "")
+        menu.addItem(withTitle: "Engine:  \(cfg.engine == "parakeet" ? "Parakeet v3" : "Whisper turbo")", action: nil, keyEquivalent: "")
         menu.addItem(.separator())
         let s = menu.addItem(withTitle: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
         s.target = self

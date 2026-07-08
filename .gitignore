@@ -15,3 +15,7 @@ wispr.log
 
 # macOS
 .DS_Store
+
+# parakeet.cpp build tree (cloned + built locally)
+parakeet.cpp/
+parakeet-env/
