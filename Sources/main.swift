@@ -21,11 +21,11 @@ let MODELS: [ModelInfo] = [
     ModelInfo(key: "multilingual",
               file: "parakeet-tdt-0.6b-v3-f16.gguf",
               url: "https://huggingface.co/mudler/parakeet-cpp-gguf/resolve/main/tdt-0.6b-v3-f16.gguf",
-              label: "Multilingual (v3) — 25 languages incl. Polish"),
+              label: "Multilingual (v3) — 25 languages"),
     ModelInfo(key: "english",
               file: "parakeet-tdt-0.6b-v2-f16.gguf",
               url: "https://huggingface.co/mudler/parakeet-cpp-gguf/resolve/main/tdt-0.6b-v2-f16.gguf",
-              label: "English only (v2) — most accurate for English"),
+              label: "English only (v2) — best for English"),
 ]
 func modelInfo(_ key: String) -> ModelInfo { MODELS.first { $0.key == key } ?? MODELS[0] }
 func modelDownloaded(_ key: String) -> Bool { FileManager.default.fileExists(atPath: modelPath(modelInfo(key).file)) }
@@ -874,9 +874,6 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         self.init(window: win)
         self.app = app
 
-        let title = NSTextField(labelWithString: "WisprLite Settings")
-        title.font = .systemFont(ofSize: 16, weight: .semibold)
-
         for cs in [dictateChips, enterChips] {
             cs.orientation = .horizontal; cs.spacing = 8; cs.alignment = .centerY
         }
@@ -939,7 +936,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         let resetBtn = NSButton(title: "Reset to defaults", target: self, action: #selector(resetDefaults))
         resetBtn.bezelStyle = .rounded
 
-        let stack = NSStackView(views: [title, grid, hint, resetBtn])
+        let stack = NSStackView(views: [grid, hint, resetBtn])
         stack.orientation = .vertical
         stack.alignment = .centerX
         stack.spacing = 12
@@ -1065,10 +1062,12 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         let check = NSTextField(labelWithString: downloaded ? "✓" : "○")
         check.textColor = downloaded ? .systemGreen : .tertiaryLabelColor
         check.font = .systemFont(ofSize: 13, weight: .bold)
-        check.widthAnchor.constraint(equalToConstant: 14).isActive = true
+        check.setContentHuggingPriority(.required, for: .horizontal)
 
-        let label = NSTextField(labelWithString: m.label + (active ? "  ·  active" : ""))
+        let label = NSTextField(labelWithString: m.label)
         label.font = .systemFont(ofSize: 12)
+        label.lineBreakMode = .byTruncatingTail
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         let right: NSView
         if isDownloading {
@@ -1076,14 +1075,16 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             bar.isIndeterminate = false; bar.minValue = 0; bar.maxValue = 1
             bar.doubleValue = app?.downloadProgress ?? 0
             bar.controlSize = .small
-            bar.widthAnchor.constraint(equalToConstant: 80).isActive = true
+            bar.widthAnchor.constraint(equalToConstant: 90).isActive = true
             let pct = NSTextField(labelWithString: "\(Int((app?.downloadProgress ?? 0) * 100))%")
             pct.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
             pct.textColor = .secondaryLabelColor
             let s = NSStackView(views: [bar, pct]); s.spacing = 6; s.alignment = .centerY
             right = s
         } else if active {
-            right = NSView()
+            let l = NSTextField(labelWithString: "Active")
+            l.font = .systemFont(ofSize: 11, weight: .medium); l.textColor = .secondaryLabelColor
+            right = l
         } else if downloaded {
             let use = NSButton(title: "Use", target: self, action: #selector(useOrDownload(_:)))
             let del = NSButton(title: "Delete", target: self, action: #selector(deleteModelRow(_:)))
@@ -1095,11 +1096,13 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             b.bezelStyle = .rounded; b.controlSize = .small; b.tag = index
             right = b
         }
+        right.setContentHuggingPriority(.required, for: .horizontal)
+        right.setContentCompressionResistancePriority(.required, for: .horizontal)
 
-        let spacer = NSView(); spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let row = NSStackView(views: [check, label, spacer, right])
-        row.orientation = .horizontal; row.spacing = 8; row.alignment = .centerY
-        row.widthAnchor.constraint(equalToConstant: 330).isActive = true
+        let row = NSStackView(views: [check, label, right])
+        row.orientation = .horizontal; row.spacing = 10; row.alignment = .centerY
+        row.distribution = .fill
+        row.widthAnchor.constraint(equalToConstant: 400).isActive = true
         return row
     }
 
