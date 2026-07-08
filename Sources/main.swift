@@ -1047,6 +1047,16 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         app?.setModel(MODELS[sender.tag].key)
     }
 
+    @objc func deleteModelRow(_ sender: NSButton) {
+        guard sender.tag < MODELS.count else { return }
+        let m = MODELS[sender.tag]
+        let a = NSAlert()
+        a.messageText = "Delete “\(m.label)”?"
+        a.informativeText = "The model file is removed. You can download it again later."
+        a.addButton(withTitle: "Delete"); a.addButton(withTitle: "Cancel")
+        if a.runModal() == .alertFirstButtonReturn { app?.deleteModel(m.key) }
+    }
+
     private func modelRow(_ m: ModelInfo, index: Int) -> NSStackView {
         let downloaded = modelDownloaded(m.key)
         let active = app?.cfg.model == m.key
@@ -1074,8 +1084,14 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             right = s
         } else if active {
             right = NSView()
+        } else if downloaded {
+            let use = NSButton(title: "Use", target: self, action: #selector(useOrDownload(_:)))
+            let del = NSButton(title: "Delete", target: self, action: #selector(deleteModelRow(_:)))
+            for b in [use, del] { b.bezelStyle = .rounded; b.controlSize = .small; b.tag = index }
+            let s = NSStackView(views: [use, del]); s.spacing = 6; s.alignment = .centerY
+            right = s
         } else {
-            let b = NSButton(title: downloaded ? "Use" : "Download", target: self, action: #selector(useOrDownload(_:)))
+            let b = NSButton(title: "Download", target: self, action: #selector(useOrDownload(_:)))
             b.bezelStyle = .rounded; b.controlSize = .small; b.tag = index
             right = b
         }
@@ -1415,9 +1431,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // Switch model: download if we don't have it yet, then (re)start the server on it.
     func setModel(_ key: String, then: (() -> Void)? = nil) {
-        cfg.model = key; cfg.save(); buildMenu()
+        cfg.model = key; cfg.save(); buildMenu(); refreshModelUI()
         if modelDownloaded(key) { restartServer(); then?() }
         else { downloadModel(modelInfo(key)) { [weak self] ok in if ok { self?.restartServer() }; then?() } }
+    }
+
+    // Delete a downloaded model file (not the active one).
+    func deleteModel(_ key: String) {
+        guard key != cfg.model else { return }
+        try? FileManager.default.removeItem(atPath: modelPath(modelInfo(key).file))
+        logf("deleted model \(key)")
+        refreshModelUI(); buildMenu()
     }
 
     func restartServer() {
