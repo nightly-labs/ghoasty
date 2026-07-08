@@ -88,10 +88,12 @@ struct Config: Codable {
     var animHide: Double = 0.30
     // Seconds the pill lingers after the key is released before it fades out.
     var holdDuration: Double = 1.5
+    // Leave the transcript on the clipboard after pasting (off → restore previous clipboard).
+    var leaveInClipboard: Bool = false
 
     enum CodingKeys: String, CodingKey {
         case dictateChords, dictateEnterChords, inputDeviceUID
-        case pillStyle, animAppear, animHide, holdDuration
+        case pillStyle, animAppear, animHide, holdDuration, leaveInClipboard
         case dictateKeys, dictateEnterKeys  // legacy
     }
 
@@ -111,6 +113,7 @@ struct Config: Codable {
         if let x = try? c.decode(Double.self, forKey: .animAppear) { animAppear = x }
         if let x = try? c.decode(Double.self, forKey: .animHide) { animHide = x }
         if let x = try? c.decode(Double.self, forKey: .holdDuration) { holdDuration = x }
+        if let b = try? c.decode(Bool.self, forKey: .leaveInClipboard) { leaveInClipboard = b }
     }
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
@@ -121,6 +124,7 @@ struct Config: Codable {
         try c.encode(animAppear, forKey: .animAppear)
         try c.encode(animHide, forKey: .animHide)
         try c.encode(holdDuration, forKey: .holdDuration)
+        try c.encode(leaveInClipboard, forKey: .leaveInClipboard)
     }
 
     static let url = FileManager.default.homeDirectoryForCurrentUser
@@ -347,15 +351,34 @@ final class Paster {
         down?.flags = flags; up?.flags = flags
         down?.post(tap: .cghidEventTap); up?.post(tap: .cghidEventTap)
     }
-    func paste(_ text: String, pressEnter: Bool) {
+    func paste(_ text: String, pressEnter: Bool, keepInClipboard: Bool) {
         guard !text.isEmpty else { return }
         let pb = NSPasteboard.general
+
+        // Snapshot the current clipboard so we can restore it (unless the user opts to keep
+        // the transcript). Copies every type of every item.
+        let saved: [NSPasteboardItem]? = keepInClipboard ? nil : pb.pasteboardItems?.map { item in
+            let copy = NSPasteboardItem()
+            for type in item.types {
+                if let data = item.data(forType: type) { copy.setData(data, forType: type) }
+            }
+            return copy
+        }
+
         pb.clearContents()
         pb.setString(text, forType: .string)
         postKey(0x09, flags: .maskCommand)  // Cmd+V
         if pressEnter {
             usleep(30_000)                   // let paste land before Return
             postKey(0x24)                    // Return
+        }
+
+        if let saved {
+            // Restore after the paste has been consumed by the target app.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                pb.clearContents()
+                if !saved.isEmpty { pb.writeObjects(saved) }
+            }
         }
     }
 }
@@ -614,6 +637,7 @@ final class SettingsWindowController: NSWindowController {
     private let appearVal = SettingsWindowController.valueLabel()
     private let hideVal = SettingsWindowController.valueLabel()
     private let holdVal = SettingsWindowController.valueLabel()
+    private let clipboardCheck = NSButton(checkboxWithTitle: "Leave transcript in clipboard", target: nil, action: nil)
 
     static func caption(_ s: String) -> NSTextField {
         let l = NSTextField(labelWithString: s)
@@ -645,7 +669,7 @@ final class SettingsWindowController: NSWindowController {
 
     convenience init(app: AppDelegate) {
         let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 520, height: 520),
+            contentRect: NSRect(x: 0, y: 0, width: 520, height: 560),
             styleMask: [.titled, .closable], backing: .buffered, defer: false)
         win.title = "WisprLite Settings"
         win.isReleasedWhenClosed = false
@@ -664,6 +688,7 @@ final class SettingsWindowController: NSWindowController {
         dictateAddBtn.title = "＋ Add combo"; enterAddBtn.title = "＋ Add combo"
         micPopup.target = self; micPopup.action = #selector(pickMic)
         stylePopup.target = self; stylePopup.action = #selector(pickStyle)
+        clipboardCheck.target = self; clipboardCheck.action = #selector(toggleClipboard)
         for sl in [appearSlider, hideSlider] {
             sl.minValue = 0.10; sl.maxValue = 0.55   // slow → fast (lerp rate)
             sl.target = self; sl.action = #selector(changeAnim)
@@ -679,6 +704,7 @@ final class SettingsWindowController: NSWindowController {
             [SettingsWindowController.caption("Dictate"), dictateChips],
             [SettingsWindowController.caption("Dictate + Enter"), enterChips],
             [SettingsWindowController.caption("Microphone"), micPopup],
+            [SettingsWindowController.caption("Clipboard"), clipboardCheck],
             [SettingsWindowController.caption("Overlay"), stylePopup],
             [SettingsWindowController.caption("Appear speed"), sliderRow(appearSlider, appearVal)],
             [SettingsWindowController.caption("Hide speed"), sliderRow(hideSlider, hideVal)],
@@ -687,7 +713,7 @@ final class SettingsWindowController: NSWindowController {
         grid.rowSpacing = 14
         grid.columnSpacing = 16
         grid.column(at: 0).xPlacement = .trailing
-        for i in 0..<7 { grid.row(at: i).yPlacement = .center }
+        for i in 0..<8 { grid.row(at: i).yPlacement = .center }
 
         let hint = NSTextField(wrappingLabelWithString:
             "Hotkeys: add modifier combos (⌥, ⌘⇧, ⌃⌥, Fn…) — any starts dictation; “Dictate + Enter” also presses Return. "
@@ -747,6 +773,7 @@ final class SettingsWindowController: NSWindowController {
         appearSlider.doubleValue = app?.cfg.animAppear ?? 0.30
         hideSlider.doubleValue = app?.cfg.animHide ?? 0.30
         holdSlider.doubleValue = app?.cfg.holdDuration ?? 1.5
+        clipboardCheck.state = (app?.cfg.leaveInClipboard ?? false) ? .on : .off
         updateAnimLabels()
 
         micPopup.removeAllItems()
@@ -773,6 +800,11 @@ final class SettingsWindowController: NSWindowController {
     }
 
     @objc func resetDefaults() { app?.resetConfig() }
+
+    @objc func toggleClipboard(_ sender: NSButton) {
+        app?.cfg.leaveInClipboard = (sender.state == .on)
+        app?.cfg.save()
+    }
 
     @objc func pickStyle(_ sender: NSPopUpButton) {
         guard let app, let s = sender.selectedItem?.representedObject as? String else { return }
@@ -956,7 +988,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let text = self.transcriber.transcribe(wav)
             DispatchQueue.main.async {
                 logf("TRANSCRIPT len=\(text.count) trusted=\(AXIsProcessTrusted()) text='\(text.prefix(80))'")
-                self.paster.paste(text, pressEnter: enter)
+                self.paster.paste(text, pressEnter: enter, keepInClipboard: self.cfg.leaveInClipboard)
                 self.setIcon("🎙️")
                 let words = text.split { $0 == " " || $0 == "\n" || $0 == "\t" }.count
                 let wpm = seconds > 0.5 ? Int((Double(words) / (seconds / 60)).rounded()) : 0
