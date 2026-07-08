@@ -1,0 +1,51 @@
+@import "tailwindcss";
+
+@theme {
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
+  --color-ink: #08080c;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--color-ink);
+  color: #f5f5f7;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Iridescent glow sampled from the Ghoasty app icon (purple / periwinkle / mint / amber). */
+.ghoasty-glow {
+  background:
+    radial-gradient(48% 46% at 38% 30%, rgba(139, 110, 255, 0.7) 0%, transparent 60%),
+    radial-gradient(46% 44% at 62% 28%, rgba(112, 150, 255, 0.6) 0%, transparent 62%),
+    radial-gradient(48% 48% at 68% 58%, rgba(246, 176, 96, 0.52) 0%, transparent 60%),
+    radial-gradient(46% 46% at 34% 60%, rgba(150, 232, 194, 0.42) 0%, transparent 62%),
+    radial-gradient(40% 36% at 50% 40%, rgba(210, 200, 255, 0.34) 0%, transparent 58%);
+  filter: saturate(1.25);
+  animation: ghoasty-float 22s ease-in-out infinite alternate;
+}
+
+@keyframes ghoasty-float {
+  from {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  to {
+    transform: translate3d(-2%, 2.5%, 0) scale(1.08);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ghoasty-glow {
+    animation: none;
+  }
+}
