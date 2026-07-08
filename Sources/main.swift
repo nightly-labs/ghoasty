@@ -2,6 +2,7 @@ import AppKit
 import AVFoundation
 import ApplicationServices
 import CoreAudio
+import ServiceManagement
 
 // WisprLite — push-to-talk local dictation.
 // Hold a bound modifier to record, release to transcribe (whisper.cpp) and paste.
@@ -290,29 +291,73 @@ extension Data { mutating func appendStr(_ s: String) { if let d = s.data(using:
 // Keeps the Parakeet model resident in parakeet-server (OpenAI-compatible) on port 8090.
 final class ParakeetServer {
     private var proc: Process?
+    private(set) var ready = false
+    var onReady: (() -> Void)?
 
     func start() {
         guard FileManager.default.fileExists(atPath: PARAKEET_SERVER_BIN) else {
             logf("parakeet-server missing — run build.sh"); return
         }
+        // Clear any orphaned server (e.g. from a previous crash) so port 8090 is free.
+        let kill = Process()
+        kill.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+        kill.arguments = ["-x", "parakeet-server"]
+        try? kill.run(); kill.waitUntilExit()
+        usleep(200_000)
+
         let p = Process()
         p.standardOutput = FileHandle.nullDevice
         p.standardError = FileHandle.nullDevice
         p.executableURL = URL(fileURLWithPath: PARAKEET_SERVER_BIN)
         p.arguments = ["--model", PARAKEET_MODEL, "--host", "127.0.0.1", "--port", "8090"]
-        do { try p.run(); proc = p; logf("parakeet-server starting") }
+        do { try p.run(); proc = p; logf("parakeet-server starting"); pollReady() }
         catch { logf("parakeet-server failed to start: \(error)") }
     }
 
     func stop() { proc?.terminate(); proc?.waitUntilExit(); proc = nil }
+
+    // Poll until the model has loaded and the server answers, then flip `ready`.
+    private func pollReady() {
+        DispatchQueue.global().async { [weak self] in
+            for _ in 0..<120 {               // up to ~60s
+                if self?.ping() == true {
+                    DispatchQueue.main.async { self?.ready = true; self?.onReady?() }
+                    return
+                }
+                usleep(500_000)
+            }
+        }
+    }
+
+    private func ping() -> Bool {
+        guard let url = URL(string: "http://127.0.0.1:8090/") else { return false }
+        var req = URLRequest(url: url); req.timeoutInterval = 1
+        let sem = DispatchSemaphore(value: 0); var up = false
+        URLSession.shared.dataTask(with: req) { _, resp, _ in
+            if resp is HTTPURLResponse { up = true }   // any HTTP reply = server is listening
+            sem.signal()
+        }.resume()
+        _ = sem.wait(timeout: .now() + 2)
+        return up
+    }
 }
 
 final class Transcriber {
     static let endpoint = URL(string: "http://127.0.0.1:8090/v1/audio/transcriptions")!
 
     // Parakeet is multilingual with built-in language auto-detect + punctuation.
-    func transcribe(_ wav: URL) -> String {
-        guard let audio = try? Data(contentsOf: wav) else { return "" }
+    // Returns nil on request failure (e.g. server still warming up); "" = no speech.
+    // Retries a few times so dictating during model warm-up still lands.
+    func transcribe(_ wav: URL) -> String? {
+        guard let audio = try? Data(contentsOf: wav) else { return nil }
+        for attempt in 0..<4 {
+            if let text = post(audio) { return text }
+            if attempt < 3 { usleep(500_000) }   // server likely still loading — wait & retry
+        }
+        return nil
+    }
+
+    private func post(_ audio: Data) -> String? {
         let boundary = "WisprLiteBoundary7MA4YWxkTrZu0gW"
         var body = Data()
         body.appendStr("--\(boundary)\r\n")
@@ -330,13 +375,12 @@ final class Transcriber {
         req.httpBody = body
 
         let sem = DispatchSemaphore(value: 0)
-        var result = ""
+        var result: String? = nil
         URLSession.shared.dataTask(with: req) { data, resp, _ in
             defer { sem.signal() }
-            if let http = resp as? HTTPURLResponse, !(200...299).contains(http.statusCode) { return }
-            if let data, let s = String(data: data, encoding: .utf8) {
-                result = s.trimmingCharacters(in: .whitespacesAndNewlines)
-            }
+            guard let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode),
+                  let data, let s = String(data: data, encoding: .utf8) else { return }
+            result = s.trimmingCharacters(in: .whitespacesAndNewlines)
         }.resume()
         sem.wait()
         return result
@@ -638,6 +682,7 @@ final class SettingsWindowController: NSWindowController {
     private let hideVal = SettingsWindowController.valueLabel()
     private let holdVal = SettingsWindowController.valueLabel()
     private let clipboardCheck = NSButton(checkboxWithTitle: "Leave transcript in clipboard", target: nil, action: nil)
+    private let loginCheck = NSButton(checkboxWithTitle: "Launch WisprLite at login", target: nil, action: nil)
 
     static func caption(_ s: String) -> NSTextField {
         let l = NSTextField(labelWithString: s)
@@ -669,7 +714,7 @@ final class SettingsWindowController: NSWindowController {
 
     convenience init(app: AppDelegate) {
         let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 520, height: 560),
+            contentRect: NSRect(x: 0, y: 0, width: 520, height: 600),
             styleMask: [.titled, .closable], backing: .buffered, defer: false)
         win.title = "WisprLite Settings"
         win.isReleasedWhenClosed = false
@@ -689,6 +734,7 @@ final class SettingsWindowController: NSWindowController {
         micPopup.target = self; micPopup.action = #selector(pickMic)
         stylePopup.target = self; stylePopup.action = #selector(pickStyle)
         clipboardCheck.target = self; clipboardCheck.action = #selector(toggleClipboard)
+        loginCheck.target = self; loginCheck.action = #selector(toggleLogin)
         for sl in [appearSlider, hideSlider] {
             sl.minValue = 0.10; sl.maxValue = 0.55   // slow → fast (lerp rate)
             sl.target = self; sl.action = #selector(changeAnim)
@@ -705,6 +751,7 @@ final class SettingsWindowController: NSWindowController {
             [SettingsWindowController.caption("Dictate + Enter"), enterChips],
             [SettingsWindowController.caption("Microphone"), micPopup],
             [SettingsWindowController.caption("Clipboard"), clipboardCheck],
+            [SettingsWindowController.caption("Startup"), loginCheck],
             [SettingsWindowController.caption("Overlay"), stylePopup],
             [SettingsWindowController.caption("Appear speed"), sliderRow(appearSlider, appearVal)],
             [SettingsWindowController.caption("Hide speed"), sliderRow(hideSlider, hideVal)],
@@ -713,7 +760,7 @@ final class SettingsWindowController: NSWindowController {
         grid.rowSpacing = 14
         grid.columnSpacing = 16
         grid.column(at: 0).xPlacement = .trailing
-        for i in 0..<8 { grid.row(at: i).yPlacement = .center }
+        for i in 0..<9 { grid.row(at: i).yPlacement = .center }
 
         let hint = NSTextField(wrappingLabelWithString:
             "Hotkeys: add modifier combos (⌥, ⌘⇧, ⌃⌥, Fn…) — any starts dictation; “Dictate + Enter” also presses Return. "
@@ -774,6 +821,7 @@ final class SettingsWindowController: NSWindowController {
         hideSlider.doubleValue = app?.cfg.animHide ?? 0.30
         holdSlider.doubleValue = app?.cfg.holdDuration ?? 1.5
         clipboardCheck.state = (app?.cfg.leaveInClipboard ?? false) ? .on : .off
+        loginCheck.state = (SMAppService.mainApp.status == .enabled) ? .on : .off
         updateAnimLabels()
 
         micPopup.removeAllItems()
@@ -804,6 +852,16 @@ final class SettingsWindowController: NSWindowController {
     @objc func toggleClipboard(_ sender: NSButton) {
         app?.cfg.leaveInClipboard = (sender.state == .on)
         app?.cfg.save()
+    }
+
+    @objc func toggleLogin(_ sender: NSButton) {
+        do {
+            if sender.state == .on { try SMAppService.mainApp.register() }
+            else { try SMAppService.mainApp.unregister() }
+        } catch {
+            logf("login item toggle failed: \(error)")
+            sender.state = (SMAppService.mainApp.status == .enabled) ? .on : .off
+        }
     }
 
     @objc func pickStyle(_ sender: NSPopUpButton) {
@@ -857,11 +915,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var overlay: PillOverlay?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        setIcon("🎙️")
+        // Single instance: if another copy is already running, hand off and quit.
+        let bid = Bundle.main.bundleIdentifier ?? "com.local.wisprlite"
+        let others = NSRunningApplication.runningApplications(withBundleIdentifier: bid)
+            .filter { $0 != .current }
+        if !others.isEmpty { others.first?.activate(); NSApp.terminate(nil); return }
+
+        setIcon("⏳")                         // warming up until the model loads
         buildMenu()
         overlay = PillOverlay(levelProvider: { [weak self] in self?.recorder.level() ?? 0 })
         applyOverlayConfig()
         recorder.deviceUID = cfg.inputDeviceUID
+        parakeet.onReady = { [weak self] in self?.setIcon("🎙️") }
         parakeet.start()
         checkPermissions()
         installEventTap()
@@ -985,8 +1050,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let seconds = Date().timeIntervalSince(recordStart)
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
-            let text = self.transcriber.transcribe(wav)
+            let result = self.transcriber.transcribe(wav)
             DispatchQueue.main.async {
+                guard let text = result else {           // request failed (server down / warming up)
+                    logf("TRANSCRIBE FAILED")
+                    self.flashError()
+                    self.overlay?.setActive(false)
+                    return
+                }
                 logf("TRANSCRIPT len=\(text.count) trusted=\(AXIsProcessTrusted()) text='\(text.prefix(80))'")
                 self.paster.paste(text, pressEnter: enter, keepInClipboard: self.cfg.leaveInClipboard)
                 self.setIcon("🎙️")
@@ -1000,6 +1071,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     self.overlay?.holdThenHide()        // minimal → linger, then fade
                 }
             }
+        }
+    }
+
+    func flashError() {
+        setIcon("⚠️")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) { [weak self] in
+            self?.setIcon(self?.parakeet.ready == true ? "🎙️" : "⏳")
         }
     }
 
