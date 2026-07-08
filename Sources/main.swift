@@ -611,6 +611,9 @@ final class PillView: NSView {
 
     override var isFlipped: Bool { false }
 
+    // Frosted-glass backdrop, kept in sync with the pill's shape/scale/fade each frame.
+    weak var blurView: NSVisualEffectView?
+
     private var lastVisible = false
     func tick() {
         let rate = presenceTarget > presence ? appearRate : hideRate
@@ -672,7 +675,7 @@ final class PillView: NSView {
     override func draw(_ dirtyRect: NSRect) {
         guard let ctx = NSGraphicsContext.current?.cgContext else { return }
         let p = max(0, min(1, presence))
-        guard p > 0.003 else { return }
+        guard p > 0.003 else { blurView?.alphaValue = 0; return }
         let e = p * p * (3 - 2 * p)             // smoothstep
         let scale = lerp(0.62, 1, e)            // whole pill shrinks toward its centre
 
@@ -684,6 +687,14 @@ final class PillView: NSView {
         let pill = CGRect(x: leftX, y: cy - h / 2, width: activeW + panelW, height: h)
         let anchorX = pill.midX
 
+        // Frosted backdrop follows the scaled pill (scale is about anchorX,cy → stays centered there).
+        if let blur = blurView {
+            let sw = pill.width * scale, sh = h * scale
+            blur.frame = CGRect(x: anchorX - sw / 2, y: cy - sh / 2, width: sw, height: sh)
+            blur.layer?.cornerRadius = sh / 2
+            blur.alphaValue = p
+        }
+
         ctx.saveGState()
         ctx.translateBy(x: anchorX, y: cy)
         ctx.scaleBy(x: scale, y: scale)
@@ -692,7 +703,7 @@ final class PillView: NSView {
         // pill background
         ctx.setShadow(offset: CGSize(width: 0, height: -2), blur: 14 * p,
                       color: NSColor.black.withAlphaComponent(0.4 * p).cgColor)
-        NSColor(white: 0.09, alpha: 0.97 * p).setFill()
+        NSColor(white: 0.09, alpha: 0.15 * p).setFill()   // translucent tint over the frosted blur
         NSBezierPath(roundedRect: pill, xRadius: h / 2, yRadius: h / 2).fill()
         ctx.setShadow(offset: .zero, blur: 0, color: nil)
 
@@ -760,9 +771,22 @@ final class PillOverlay {
         window.level = .statusBar
         window.ignoresMouseEvents = true
         window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary]
+        // Container holds the frosted backdrop (bottom) with the pill drawing on top.
+        let container = NSView(frame: NSRect(origin: .zero, size: size))
+        let blur = NSVisualEffectView(frame: NSRect(origin: .zero, size: size))
+        blur.material = .hudWindow
+        blur.blendingMode = .behindWindow
+        blur.state = .active
+        blur.wantsLayer = true
+        blur.layer?.masksToBounds = true
+        blur.alphaValue = 0
+        container.addSubview(blur)
+
         view.frame = NSRect(origin: .zero, size: size)
         view.levelProvider = levelProvider
-        window.contentView = view
+        view.blurView = blur
+        container.addSubview(view)
+        window.contentView = container
         reposition()
         window.orderFrontRegardless()
 
