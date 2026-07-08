@@ -4,29 +4,26 @@ Local push-to-talk dictation for macOS (Apple Silicon). Hold a modifier combo, s
 release — your speech is transcribed on-device and pasted where the cursor is.
 
 - **Local & private** — audio never leaves the machine
-- **Two engines** (switchable in Settings):
-  - **Parakeet v3** (default) — parakeet.cpp, ~0.1s/utterance, multilingual auto-detect + automatic punctuation
-  - **Whisper Large v3 Turbo** — whisper.cpp, with a language whitelist, VAD, and domain prompt
+- **Parakeet v3** engine (parakeet.cpp, Metal) — ~0.1s/utterance, multilingual auto-detect + automatic punctuation
 - **Push-to-talk** — bind any modifier combo (⌥, ⌘⇧, ⌃⌥, Fn…); a second combo also presses Return
 - **Built-in mic capture** so Bluetooth headphones stay in high-quality output mode
-- **Floating waveform pill** at the bottom of the screen, reacting to your voice
+- **Floating waveform pill** at the bottom of the screen, reacting to your voice (Full or Minimal style, adjustable animation)
 
 ## Requirements
 
 - Apple Silicon Mac, macOS 13+
 - Xcode command-line tools (`swiftc`), `cmake`, `git`
-- `brew install whisper-cpp` (for the Whisper engine)
 
-`build.sh` clones and builds `parakeet.cpp` (with Metal) and downloads all models on first run.
+`build.sh` clones and builds `parakeet.cpp` (with Metal) and downloads the model on first run.
 
 ## Build & run
 
 ```sh
-./build.sh          # downloads the model (~1.5GB) on first run, compiles, bundles, signs
+./build.sh          # builds parakeet.cpp + downloads the model (~1.4GB) on first run, then compiles/signs
 open WisprLite.app
 ```
 
-The build script fetches `ggml-large-v3-turbo.bin` into `models/` (git-ignored) and signs
+The build fetches `parakeet-tdt-0.6b-v3-f16.gguf` into `models/` (git-ignored) and signs
 the app with a stable local identity so macOS permissions survive rebuilds.
 
 ## Permissions (one time)
@@ -53,6 +50,6 @@ security add-trusted-cert -r trustRoot -p codeSign \
 
 ## Config
 
-Hotkeys are stored in `~/.wisprlite/config.json` and editable from the menubar
-(**Settings…**). Transcription language is forced to Polish in `Sources/main.swift`
-(`serverTranscribe`) — change the `language` field as needed.
+Settings (hotkeys, microphone, overlay style + animation timing) are stored in
+`~/.wisprlite/config.json` and editable from the menubar (**Settings…**). Parakeet
+auto-detects the spoken language, so there is no language setting to configure.

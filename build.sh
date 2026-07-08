@@ -3,23 +3,11 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 APP="WisprLite.app"
-MODEL="models/ggml-large-v3-turbo.bin"
-MODEL_URL="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin"
-VAD="models/ggml-silero-v5.1.2.bin"
-VAD_URL="https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v5.1.2.bin"
 PK_MODEL="models/parakeet-tdt-0.6b-v3-f16.gguf"
 PK_MODEL_URL="https://huggingface.co/mudler/parakeet-cpp-gguf/resolve/main/tdt-0.6b-v3-f16.gguf"
 
-# 1. models — kept beside the app, not bundled
+# 1. model — kept beside the app, not bundled
 mkdir -p models
-if [ ! -f "$MODEL" ]; then
-  echo "==> downloading whisper large-v3-turbo model (~1.6GB)..."
-  curl -L --fail -o "$MODEL" "$MODEL_URL"
-fi
-if [ ! -f "$VAD" ]; then
-  echo "==> downloading Silero VAD model (~2MB)..."
-  curl -L --fail -o "$VAD" "$VAD_URL"
-fi
 if [ ! -f "$PK_MODEL" ]; then
   echo "==> downloading Parakeet v3 model (~1.4GB)..."
   curl -L --fail -o "$PK_MODEL" "$PK_MODEL_URL"
