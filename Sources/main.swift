@@ -91,10 +91,12 @@ struct Config: Codable {
     var holdDuration: Double = 1.5
     // Leave the transcript on the clipboard after pasting (off → restore previous clipboard).
     var leaveInClipboard: Bool = false
+    // Text replacements applied to every transcript: each entry is [from, to].
+    var replacements: [[String]] = []
 
     enum CodingKeys: String, CodingKey {
         case dictateChords, dictateEnterChords, inputDeviceUID
-        case pillStyle, animAppear, animHide, holdDuration, leaveInClipboard
+        case pillStyle, animAppear, animHide, holdDuration, leaveInClipboard, replacements
         case dictateKeys, dictateEnterKeys  // legacy
     }
 
@@ -115,6 +117,7 @@ struct Config: Codable {
         if let x = try? c.decode(Double.self, forKey: .animHide) { animHide = x }
         if let x = try? c.decode(Double.self, forKey: .holdDuration) { holdDuration = x }
         if let b = try? c.decode(Bool.self, forKey: .leaveInClipboard) { leaveInClipboard = b }
+        if let r = try? c.decode([[String]].self, forKey: .replacements) { replacements = r }
     }
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
@@ -126,6 +129,7 @@ struct Config: Codable {
         try c.encode(animHide, forKey: .animHide)
         try c.encode(holdDuration, forKey: .holdDuration)
         try c.encode(leaveInClipboard, forKey: .leaveInClipboard)
+        try c.encode(replacements, forKey: .replacements)
     }
 
     static let url = FileManager.default.homeDirectoryForCurrentUser
@@ -287,6 +291,15 @@ final class Recorder {
 }
 
 extension Data { mutating func appendStr(_ s: String) { if let d = s.data(using: .utf8) { append(d) } } }
+
+// User dictionary: case-insensitive text replacements applied to every transcript.
+func applyReplacements(_ text: String, _ rules: [[String]]) -> String {
+    var out = text
+    for r in rules where r.count == 2 && !r[0].isEmpty {
+        out = out.replacingOccurrences(of: r[0], with: r[1], options: [.caseInsensitive])
+    }
+    return out
+}
 
 // Keeps the Parakeet model resident in parakeet-server (OpenAI-compatible) on port 8090.
 final class ParakeetServer {
@@ -683,6 +696,7 @@ final class SettingsWindowController: NSWindowController {
     private let holdVal = SettingsWindowController.valueLabel()
     private let clipboardCheck = NSButton(checkboxWithTitle: "Leave transcript in clipboard", target: nil, action: nil)
     private let loginCheck = NSButton(checkboxWithTitle: "Launch WisprLite at login", target: nil, action: nil)
+    private let dictBtn = NSButton(title: "Edit dictionary…", target: nil, action: nil)
 
     static func caption(_ s: String) -> NSTextField {
         let l = NSTextField(labelWithString: s)
@@ -714,7 +728,7 @@ final class SettingsWindowController: NSWindowController {
 
     convenience init(app: AppDelegate) {
         let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 520, height: 600),
+            contentRect: NSRect(x: 0, y: 0, width: 520, height: 640),
             styleMask: [.titled, .closable], backing: .buffered, defer: false)
         win.title = "WisprLite Settings"
         win.isReleasedWhenClosed = false
@@ -735,6 +749,7 @@ final class SettingsWindowController: NSWindowController {
         stylePopup.target = self; stylePopup.action = #selector(pickStyle)
         clipboardCheck.target = self; clipboardCheck.action = #selector(toggleClipboard)
         loginCheck.target = self; loginCheck.action = #selector(toggleLogin)
+        dictBtn.target = self; dictBtn.action = #selector(openDictionary); dictBtn.bezelStyle = .rounded
         for sl in [appearSlider, hideSlider] {
             sl.minValue = 0.10; sl.maxValue = 0.55   // slow → fast (lerp rate)
             sl.target = self; sl.action = #selector(changeAnim)
@@ -752,6 +767,7 @@ final class SettingsWindowController: NSWindowController {
             [SettingsWindowController.caption("Microphone"), micPopup],
             [SettingsWindowController.caption("Clipboard"), clipboardCheck],
             [SettingsWindowController.caption("Startup"), loginCheck],
+            [SettingsWindowController.caption("Dictionary"), dictBtn],
             [SettingsWindowController.caption("Overlay"), stylePopup],
             [SettingsWindowController.caption("Appear speed"), sliderRow(appearSlider, appearVal)],
             [SettingsWindowController.caption("Hide speed"), sliderRow(hideSlider, hideVal)],
@@ -760,7 +776,7 @@ final class SettingsWindowController: NSWindowController {
         grid.rowSpacing = 14
         grid.columnSpacing = 16
         grid.column(at: 0).xPlacement = .trailing
-        for i in 0..<9 { grid.row(at: i).yPlacement = .center }
+        for i in 0..<10 { grid.row(at: i).yPlacement = .center }
 
         let hint = NSTextField(wrappingLabelWithString:
             "Hotkeys: add modifier combos (⌥, ⌘⇧, ⌃⌥, Fn…) — any starts dictation; “Dictate + Enter” also presses Return. "
@@ -849,6 +865,8 @@ final class SettingsWindowController: NSWindowController {
 
     @objc func resetDefaults() { app?.resetConfig() }
 
+    @objc func openDictionary() { app?.openDict() }
+
     @objc func toggleClipboard(_ sender: NSButton) {
         app?.cfg.leaveInClipboard = (sender.state == .on)
         app?.cfg.save()
@@ -897,6 +915,95 @@ final class SettingsWindowController: NSWindowController {
     }
 }
 
+// ---- Dictionary editor (text replacements) ----
+final class DictWindowController: NSWindowController, NSWindowDelegate {
+    weak var app: AppDelegate?
+    private let rows = NSStackView()
+
+    convenience init(app: AppDelegate) {
+        let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 380),
+                           styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        win.title = "Dictionary"; win.isReleasedWhenClosed = false
+        self.init(window: win); self.app = app
+        win.delegate = self
+
+        rows.orientation = .vertical; rows.alignment = .leading; rows.spacing = 8
+
+        let addBtn = NSButton(title: "＋ Add replacement", target: self, action: #selector(addPair))
+        addBtn.bezelStyle = .rounded
+        let hint = NSTextField(wrappingLabelWithString:
+            "Applied to every transcript (case-insensitive). Example: “solona” → “Solana”.")
+        hint.font = .systemFont(ofSize: 11); hint.textColor = .tertiaryLabelColor
+        hint.widthAnchor.constraint(equalToConstant: 400).isActive = true
+
+        let stack = NSStackView(views: [rows, addBtn, hint])
+        stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 14
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        stack.edgeInsets = NSEdgeInsets(top: 20, left: 20, bottom: 20, right: 20)
+        let content = win.contentView!
+        content.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            stack.topAnchor.constraint(equalTo: content.topAnchor),
+        ])
+        refresh()
+    }
+
+    func refresh() {
+        for v in rows.arrangedSubviews { rows.removeArrangedSubview(v); v.removeFromSuperview() }
+        for pair in app?.cfg.replacements ?? [] {
+            rows.addArrangedSubview(makeRow(pair.first ?? "", pair.count > 1 ? pair[1] : ""))
+        }
+    }
+
+    private func field(_ s: String, placeholder: String) -> NSTextField {
+        let tf = NSTextField(string: s)
+        tf.placeholderString = placeholder
+        tf.target = self; tf.action = #selector(commit)
+        tf.widthAnchor.constraint(equalToConstant: 150).isActive = true
+        return tf
+    }
+
+    private func makeRow(_ from: String, _ to: String) -> NSStackView {
+        let arrow = NSTextField(labelWithString: "→"); arrow.textColor = .secondaryLabelColor
+        let remove = NSButton(title: "✕", target: self, action: #selector(removePair(_:)))
+        remove.bezelStyle = .rounded
+        let row = NSStackView(views: [field(from, placeholder: "heard"), arrow,
+                                      field(to, placeholder: "replace with"), remove])
+        row.orientation = .horizontal; row.spacing = 8; row.alignment = .centerY
+        return row
+    }
+
+    @objc private func addPair() { commit(); app?.cfg.replacements.append(["", ""]); refresh() }
+
+    @objc private func removePair(_ sender: NSButton) {
+        if let row = sender.superview as? NSStackView { rows.removeArrangedSubview(row); row.removeFromSuperview() }
+        commit()
+    }
+
+    @objc private func commit() {
+        var pairs: [[String]] = []
+        for case let row as NSStackView in rows.arrangedSubviews {
+            let subs = row.arrangedSubviews
+            guard subs.count >= 3,
+                  let f = (subs[0] as? NSTextField)?.stringValue.trimmingCharacters(in: .whitespaces),
+                  let t = (subs[2] as? NSTextField)?.stringValue.trimmingCharacters(in: .whitespaces)
+            else { continue }
+            if !f.isEmpty { pairs.append([f, t]) }
+        }
+        app?.cfg.replacements = pairs
+        app?.cfg.save()
+    }
+
+    func windowWillClose(_ notification: Notification) { commit() }
+
+    func show() {
+        refresh()
+        NSApp.activate(ignoringOtherApps: true)
+        window?.makeKeyAndOrderFront(nil)
+    }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     let recorder = Recorder()
@@ -912,6 +1019,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var recordStart = Date()
     var capturing: Capturing = .none
     var settingsWC: SettingsWindowController?
+    var dictWC: DictWindowController?
     var overlay: PillOverlay?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -1052,12 +1160,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             let result = self.transcriber.transcribe(wav)
             DispatchQueue.main.async {
-                guard let text = result else {           // request failed (server down / warming up)
+                guard let raw = result else {            // request failed (server down / warming up)
                     logf("TRANSCRIBE FAILED")
                     self.flashError()
                     self.overlay?.setActive(false)
                     return
                 }
+                let text = applyReplacements(raw, self.cfg.replacements)
                 logf("TRANSCRIPT len=\(text.count) trusted=\(AXIsProcessTrusted()) text='\(text.prefix(80))'")
                 self.paster.paste(text, pressEnter: enter, keepInClipboard: self.cfg.leaveInClipboard)
                 self.setIcon("🎙️")
@@ -1108,6 +1217,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if settingsWC == nil { settingsWC = SettingsWindowController(app: self) }
         settingsWC?.refresh()
         settingsWC?.show()
+    }
+
+    func openDict() {
+        if dictWC == nil { dictWC = DictWindowController(app: self) }
+        dictWC?.show()
     }
 
     @objc func quit() { NSApp.terminate(nil) }
