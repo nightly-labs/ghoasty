@@ -1,0 +1,53 @@
+# WisprLite
+
+Local push-to-talk dictation for macOS (Apple Silicon). Hold a modifier combo, speak,
+release — your speech is transcribed on-device with whisper.cpp and pasted where the cursor is.
+
+- **Local & private** — audio never leaves the machine
+- **Fast** — model stays resident in `whisper-server` (loads once, ~0.4s/utterance with turbo)
+- **Push-to-talk** — bind any modifier combo (⌥, ⌘⇧, ⌃⌥, Fn…); a second combo also presses Return
+- **Floating waveform pill** at the bottom of the screen, reacting to your voice
+
+## Requirements
+
+- Apple Silicon Mac, macOS 13+
+- Xcode command-line tools (`swiftc`)
+- `brew install whisper-cpp`
+
+## Build & run
+
+```sh
+./build.sh          # downloads the model (~1.5GB) on first run, compiles, bundles, signs
+open WisprLite.app
+```
+
+The build script fetches `ggml-large-v3-turbo.bin` into `models/` (git-ignored) and signs
+the app with a stable local identity so macOS permissions survive rebuilds.
+
+## Permissions (one time)
+
+Grant these in **System Settings → Privacy & Security**:
+
+- **Accessibility** — required for the global hotkey (event tap) and for pasting
+- **Microphone** — recording
+
+No *Input Monitoring* needed: the hotkey uses a CGEventTap gated by Accessibility.
+
+## Stable code signing (optional but recommended)
+
+Rebuilds re-sign the app. Ad-hoc signatures change identity each build, so macOS forgets
+permissions. To sign with a stable identity, create a self-signed code-signing cert once:
+
+```sh
+# generate + import (see repo history for the openssl recipe), then trust it:
+security add-trusted-cert -r trustRoot -p codeSign \
+  -k ~/Library/Keychains/login.keychain-db wispr-cert.pem
+```
+
+`build.sh` then signs with `WisprLiteDev` automatically; permissions persist across rebuilds.
+
+## Config
+
+Hotkeys are stored in `~/.wisprlite/config.json` and editable from the menubar
+(**Settings…**). Transcription language is forced to Polish in `Sources/main.swift`
+(`serverTranscribe`) — change the `language` field as needed.
