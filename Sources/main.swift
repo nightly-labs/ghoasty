@@ -148,6 +148,29 @@ struct Config: Codable {
     }
 }
 
+// ---- Recent dictations, newest first, persisted to ~/.wisprlite/history.json ----
+final class History {
+    static let url = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".wisprlite/history.json")
+    private(set) var items: [String] = []
+
+    init() {
+        if let d = try? Data(contentsOf: History.url),
+           let a = try? JSONDecoder().decode([String].self, from: d) { items = a }
+    }
+    func add(_ text: String) {
+        items.insert(text, at: 0)
+        if items.count > 100 { items = Array(items.prefix(100)) }
+        save()
+    }
+    func clear() { items = []; save() }
+    private func save() {
+        try? FileManager.default.createDirectory(
+            at: History.url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? JSONEncoder().encode(items).write(to: History.url)
+    }
+}
+
 // ---- Core Audio device helpers ----
 func allAudioDevices() -> [AudioDeviceID] {
     var addr = AudioObjectPropertyAddress(
@@ -1010,6 +1033,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let transcriber = Transcriber()
     let paster = Paster()
     let parakeet = ParakeetServer()
+    let history = History()
     var eventTap: CFMachPort?
     var cfg = Config.load()
     var isRecording = false
@@ -1170,6 +1194,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 logf("TRANSCRIPT len=\(text.count) trusted=\(AXIsProcessTrusted()) text='\(text.prefix(80))'")
                 self.paster.paste(text, pressEnter: enter, keepInClipboard: self.cfg.leaveInClipboard)
                 self.setIcon("🎙️")
+                if !text.isEmpty { self.history.add(text); self.buildMenu() }
                 let words = text.split { $0 == " " || $0 == "\n" || $0 == "\t" }.count
                 let wpm = seconds > 0.5 ? Int((Double(words) / (seconds / 60)).rounded()) : 0
                 if words == 0 {
@@ -1198,6 +1223,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(withTitle: "Dictate:  \(names(cfg.dictateChords))", action: nil, keyEquivalent: "")
         menu.addItem(withTitle: "Dictate + Enter:  \(names(cfg.dictateEnterChords))", action: nil, keyEquivalent: "")
         menu.addItem(.separator())
+
+        let histItem = menu.addItem(withTitle: "History", action: nil, keyEquivalent: "")
+        let sub = NSMenu()
+        if history.items.isEmpty {
+            sub.addItem(withTitle: "(empty)", action: nil, keyEquivalent: "")
+        } else {
+            for t in history.items.prefix(15) {
+                let flat = t.replacingOccurrences(of: "\n", with: " ")
+                let title = flat.count > 44 ? String(flat.prefix(44)) + "…" : flat
+                let it = sub.addItem(withTitle: title, action: #selector(copyHistoryItem(_:)), keyEquivalent: "")
+                it.target = self; it.representedObject = t
+            }
+            sub.addItem(.separator())
+            let clr = sub.addItem(withTitle: "Clear History", action: #selector(clearHistory), keyEquivalent: "")
+            clr.target = self
+        }
+        histItem.submenu = sub
+        menu.addItem(.separator())
+
         let s = menu.addItem(withTitle: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
         s.target = self
         menu.addItem(.separator())
@@ -1223,6 +1267,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if dictWC == nil { dictWC = DictWindowController(app: self) }
         dictWC?.show()
     }
+
+    @objc func copyHistoryItem(_ sender: NSMenuItem) {
+        guard let t = sender.representedObject as? String else { return }
+        let pb = NSPasteboard.general; pb.clearContents(); pb.setString(t, forType: .string)
+    }
+
+    @objc func clearHistory() { history.clear(); buildMenu() }
 
     @objc func quit() { NSApp.terminate(nil) }
 }
