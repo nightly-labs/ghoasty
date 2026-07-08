@@ -12,9 +12,32 @@ let ROOT_DIR = (Bundle.main.bundlePath as NSString).deletingLastPathComponent
 let MODELS_DIR = ROOT_DIR + "/models"
 func modelPath(_ file: String) -> String { MODELS_DIR + "/" + file }
 
-// Parakeet v3 (parakeet.cpp): ~0.1s/utterance, multilingual auto-detect, auto punctuation.
+// Parakeet (parakeet.cpp): ~0.1s/utterance, auto punctuation, resident server on :8090.
 let PARAKEET_SERVER_BIN = ROOT_DIR + "/parakeet.cpp/build/examples/server/parakeet-server"
-let PARAKEET_MODEL = modelPath("parakeet-tdt-0.6b-v3-f16.gguf")
+
+// Predefined models the app can download (from mudler/parakeet-cpp-gguf).
+struct ModelInfo { let key: String; let file: String; let url: String; let label: String }
+let MODELS: [ModelInfo] = [
+    ModelInfo(key: "multilingual",
+              file: "parakeet-tdt-0.6b-v3-f16.gguf",
+              url: "https://huggingface.co/mudler/parakeet-cpp-gguf/resolve/main/tdt-0.6b-v3-f16.gguf",
+              label: "Multilingual (v3) — 25 languages incl. Polish"),
+    ModelInfo(key: "english",
+              file: "parakeet-tdt-0.6b-v2-f16.gguf",
+              url: "https://huggingface.co/mudler/parakeet-cpp-gguf/resolve/main/tdt-0.6b-v2-f16.gguf",
+              label: "English only (v2) — most accurate for English"),
+]
+func modelInfo(_ key: String) -> ModelInfo { MODELS.first { $0.key == key } ?? MODELS[0] }
+func modelDownloaded(_ key: String) -> Bool { FileManager.default.fileExists(atPath: modelPath(modelInfo(key).file)) }
+
+// ---- Permissions ----
+func accessibilityGranted() -> Bool { AXIsProcessTrusted() }
+func micGranted() -> Bool { AVCaptureDevice.authorizationStatus(for: .audio) == .authorized }
+func openPrivacyPane(_ anchor: String) {
+    if let u = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(anchor)") {
+        NSWorkspace.shared.open(u)
+    }
+}
 
 let LOG_URL = FileManager.default.homeDirectoryForCurrentUser
     .appendingPathComponent("WisprLite/wispr.log")
@@ -97,11 +120,13 @@ struct Config: Codable {
     var boostMic: Bool = true
     // Play a subtle sound when recording starts / stops.
     var playSounds: Bool = false
+    // Selected transcription model key (see MODELS).
+    var model: String = "multilingual"
 
     enum CodingKeys: String, CodingKey {
         case dictateChords, dictateEnterChords, inputDeviceUID
         case pillStyle, animAppear, animHide, holdDuration, leaveInClipboard, replacements
-        case boostMic, playSounds
+        case boostMic, playSounds, model
         case dictateKeys, dictateEnterKeys  // legacy
     }
 
@@ -125,6 +150,7 @@ struct Config: Codable {
         if let r = try? c.decode([[String]].self, forKey: .replacements) { replacements = r }
         if let b = try? c.decode(Bool.self, forKey: .boostMic) { boostMic = b }
         if let b = try? c.decode(Bool.self, forKey: .playSounds) { playSounds = b }
+        if let m = try? c.decode(String.self, forKey: .model) { model = m }
     }
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
@@ -139,6 +165,7 @@ struct Config: Codable {
         try c.encode(replacements, forKey: .replacements)
         try c.encode(boostMic, forKey: .boostMic)
         try c.encode(playSounds, forKey: .playSounds)
+        try c.encode(model, forKey: .model)
     }
 
     static let url = FileManager.default.homeDirectoryForCurrentUser
@@ -352,9 +379,11 @@ final class ParakeetServer {
     private(set) var ready = false
     var onReady: (() -> Void)?
 
-    func start() {
-        guard FileManager.default.fileExists(atPath: PARAKEET_SERVER_BIN) else {
-            logf("parakeet-server missing — run build.sh"); return
+    func start(modelPath: String) {
+        ready = false
+        guard FileManager.default.fileExists(atPath: PARAKEET_SERVER_BIN),
+              FileManager.default.fileExists(atPath: modelPath) else {
+            logf("parakeet-server or model missing — run build.sh / download model"); return
         }
         // Clear any orphaned server (e.g. from a previous crash) so port 8090 is free.
         let kill = Process()
@@ -367,8 +396,8 @@ final class ParakeetServer {
         p.standardOutput = FileHandle.nullDevice
         p.standardError = FileHandle.nullDevice
         p.executableURL = URL(fileURLWithPath: PARAKEET_SERVER_BIN)
-        p.arguments = ["--model", PARAKEET_MODEL, "--host", "127.0.0.1", "--port", "8090"]
-        do { try p.run(); proc = p; logf("parakeet-server starting"); pollReady() }
+        p.arguments = ["--model", modelPath, "--host", "127.0.0.1", "--port", "8090"]
+        do { try p.run(); proc = p; logf("parakeet-server starting (\(modelPath.split(separator: "/").last ?? ""))"); pollReady() }
         catch { logf("parakeet-server failed to start: \(error)") }
     }
 
@@ -724,8 +753,15 @@ func settleMs(_ rate: Double) -> Int {
     return Int((frames / 60.0 * 1000).rounded())
 }
 
+// Inverse of settleMs: the lerp rate that settles in ~`ms` at 60 fps.
+func rateForSettleMs(_ ms: Int) -> Double {
+    let frames = max(Double(ms) / 1000.0 * 60.0, 1)
+    return 1 - exp(log(0.05) / frames)
+}
+
 // ---- Settings window ----
-final class SettingsWindowController: NSWindowController {
+final class SettingsWindowController: NSWindowController, NSWindowDelegate {
+    func windowDidBecomeKey(_ notification: Notification) { refresh() }
     weak var app: AppDelegate?
     private let dictateChips = NSStackView()
     private let enterChips = NSStackView()
@@ -736,13 +772,16 @@ final class SettingsWindowController: NSWindowController {
     private let appearSlider = NSSlider()
     private let hideSlider = NSSlider()
     private let holdSlider = NSSlider()
-    private let appearVal = SettingsWindowController.valueLabel()
-    private let hideVal = SettingsWindowController.valueLabel()
-    private let holdVal = SettingsWindowController.valueLabel()
+    private let appearVal = SettingsWindowController.valueField()
+    private let hideVal = SettingsWindowController.valueField()
+    private let holdVal = SettingsWindowController.valueField()
     private let clipboardCheck = NSButton(checkboxWithTitle: "Leave transcript in clipboard", target: nil, action: nil)
     private let loginCheck = NSButton(checkboxWithTitle: "Launch WisprLite at login", target: nil, action: nil)
     private let boostCheck = NSButton(checkboxWithTitle: "Boost quiet microphone", target: nil, action: nil)
     private let soundCheck = NSButton(checkboxWithTitle: "Play start / stop sound", target: nil, action: nil)
+    private let modelPopup = NSPopUpButton()
+    private let accStatus = NSTextField(labelWithString: "")
+    private let micStatus = NSTextField(labelWithString: "")
     private let dictBtn = NSButton(title: "Edit dictionary…", target: nil, action: nil)
 
     static func caption(_ s: String) -> NSTextField {
@@ -752,19 +791,37 @@ final class SettingsWindowController: NSWindowController {
         return l
     }
 
-    static func valueLabel() -> NSTextField {
-        let l = NSTextField(labelWithString: "")
-        l.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
-        l.textColor = .secondaryLabelColor
-        l.alignment = .right
-        l.widthAnchor.constraint(equalToConstant: 58).isActive = true
-        return l
+    // Editable ms field: user can drag the slider or type an exact value.
+    static func valueField() -> NSTextField {
+        let f = NSTextField(string: "")
+        f.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        f.alignment = .right
+        f.isEditable = true
+        f.isSelectable = true
+        f.isBezeled = true
+        f.bezelStyle = .roundedBezel
+        f.controlSize = .small
+        f.widthAnchor.constraint(equalToConstant: 64).isActive = true
+        return f
     }
 
     private func sliderRow(_ slider: NSSlider, _ value: NSTextField) -> NSStackView {
         let s = NSStackView(views: [slider, value])
         s.orientation = .horizontal; s.spacing = 8; s.alignment = .centerY
         return s
+    }
+
+    private func permRow(_ status: NSTextField, _ action: Selector) -> NSStackView {
+        status.font = .systemFont(ofSize: 12)
+        status.widthAnchor.constraint(equalToConstant: 110).isActive = true
+        let btn = NSButton(title: "Open Settings", target: self, action: action)
+        btn.bezelStyle = .rounded; btn.controlSize = .small
+        let s = NSStackView(views: [status, btn]); s.orientation = .horizontal; s.spacing = 10; s.alignment = .centerY
+        return s
+    }
+    private func setPermLabel(_ l: NSTextField, _ ok: Bool) {
+        l.stringValue = ok ? "✓ Granted" : "✕ Not granted"
+        l.textColor = ok ? .systemGreen : .systemOrange
     }
 
     private func updateAnimLabels() {
@@ -775,7 +832,7 @@ final class SettingsWindowController: NSWindowController {
 
     convenience init(app: AppDelegate) {
         let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 520, height: 700),
+            contentRect: NSRect(x: 0, y: 0, width: 520, height: 840),
             styleMask: [.titled, .closable], backing: .buffered, defer: false)
         win.title = "WisprLite Settings"
         win.isReleasedWhenClosed = false
@@ -798,7 +855,9 @@ final class SettingsWindowController: NSWindowController {
         loginCheck.target = self; loginCheck.action = #selector(toggleLogin)
         boostCheck.target = self; boostCheck.action = #selector(toggleBoost)
         soundCheck.target = self; soundCheck.action = #selector(toggleSound)
+        modelPopup.target = self; modelPopup.action = #selector(pickModel)
         dictBtn.target = self; dictBtn.action = #selector(openDictionary); dictBtn.bezelStyle = .rounded
+        win.delegate = self   // refresh permission status when the window regains focus
         for sl in [appearSlider, hideSlider] {
             sl.minValue = 0.10; sl.maxValue = 0.55   // slow → fast (lerp rate)
             sl.target = self; sl.action = #selector(changeAnim)
@@ -809,8 +868,14 @@ final class SettingsWindowController: NSWindowController {
         holdSlider.target = self; holdSlider.action = #selector(changeAnim)
         holdSlider.controlSize = .small
         holdSlider.widthAnchor.constraint(equalToConstant: 150).isActive = true
+        for f in [appearVal, hideVal, holdVal] {
+            f.target = self; f.action = #selector(editAnimValue)
+        }
 
         let grid = NSGridView(views: [
+            [SettingsWindowController.caption("Accessibility"), permRow(accStatus, #selector(openAcc))],
+            [SettingsWindowController.caption("Microphone"), permRow(micStatus, #selector(openMic))],
+            [SettingsWindowController.caption("Model"), modelPopup],
             [SettingsWindowController.caption("Dictate"), dictateChips],
             [SettingsWindowController.caption("Dictate + Enter"), enterChips],
             [SettingsWindowController.caption("Microphone"), micPopup],
@@ -827,7 +892,7 @@ final class SettingsWindowController: NSWindowController {
         grid.rowSpacing = 13
         grid.columnSpacing = 16
         grid.column(at: 0).xPlacement = .trailing
-        for i in 0..<12 { grid.row(at: i).yPlacement = .center }
+        for i in 0..<15 { grid.row(at: i).yPlacement = .center }
 
         let hint = NSTextField(wrappingLabelWithString:
             "Hotkeys: add modifier combos (⌥, ⌘⇧, ⌃⌥, Fn…) — any starts dictation; “Dictate + Enter” also presses Return. "
@@ -891,6 +956,20 @@ final class SettingsWindowController: NSWindowController {
         loginCheck.state = (SMAppService.mainApp.status == .enabled) ? .on : .off
         boostCheck.state = (app?.cfg.boostMic ?? true) ? .on : .off
         soundCheck.state = (app?.cfg.playSounds ?? false) ? .on : .off
+
+        setPermLabel(accStatus, accessibilityGranted())
+        setPermLabel(micStatus, micGranted())
+
+        modelPopup.removeAllItems()
+        for m in MODELS {
+            let downloading = app?.downloading == true && app?.cfg.model == m.key
+            let suffix = downloading ? "  (downloading…)" : (modelDownloaded(m.key) ? "" : "  (needs download)")
+            modelPopup.addItem(withTitle: m.label + suffix)
+            modelPopup.lastItem?.representedObject = m.key
+        }
+        modelPopup.isEnabled = (app?.downloading != true)
+        modelPopup.selectItem(at: MODELS.firstIndex { $0.key == app?.cfg.model } ?? 0)
+
         updateAnimLabels()
 
         micPopup.removeAllItems()
@@ -927,6 +1006,19 @@ final class SettingsWindowController: NSWindowController {
 
     @objc func openDictionary() { app?.openDict() }
 
+    @objc func openAcc() { openPrivacyPane("Privacy_Accessibility") }
+    @objc func openMic() {
+        if AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined {
+            AVCaptureDevice.requestAccess(for: .audio) { _ in DispatchQueue.main.async { self.refresh() } }
+        } else {
+            openPrivacyPane("Privacy_Microphone")
+        }
+    }
+    @objc func pickModel(_ sender: NSPopUpButton) {
+        guard let key = sender.selectedItem?.representedObject as? String, key != app?.cfg.model else { return }
+        app?.setModel(key)
+    }
+
     @objc func toggleClipboard(_ sender: NSButton) {
         app?.cfg.leaveInClipboard = (sender.state == .on)
         app?.cfg.save()
@@ -960,6 +1052,23 @@ final class SettingsWindowController: NSWindowController {
     }
 
     @objc func changeAnim(_ sender: NSSlider) {
+        commitAnim()
+    }
+
+    // User typed an exact ms value — convert back to the slider's internal unit, clamp, sync.
+    @objc func editAnimValue(_ sender: NSTextField) {
+        let ms = Int(sender.stringValue.filter { $0.isNumber }) ?? 0
+        if sender === holdVal {
+            holdSlider.doubleValue = min(max(Double(ms) / 1000.0, holdSlider.minValue), holdSlider.maxValue)
+        } else {
+            let slider = (sender === appearVal) ? appearSlider : hideSlider
+            slider.doubleValue = min(max(rateForSettleMs(ms), slider.minValue), slider.maxValue)
+        }
+        commitAnim()
+    }
+
+    // Read the sliders into config, persist, apply, and re-render the ms fields.
+    private func commitAnim() {
         guard let app else { return }
         app.cfg.animAppear = appearSlider.doubleValue
         app.cfg.animHide = hideSlider.doubleValue
@@ -1075,6 +1184,107 @@ final class DictWindowController: NSWindowController, NSWindowDelegate {
     }
 }
 
+// ---- First-run setup: permissions + model download ----
+final class OnboardWindowController: NSWindowController, NSWindowDelegate {
+    weak var app: AppDelegate?
+    private let micStatus = NSTextField(labelWithString: "")
+    private let accStatus = NSTextField(labelWithString: "")
+    private let modelStatus = NSTextField(labelWithString: "")
+    private let micBtn = NSButton(title: "Grant", target: nil, action: nil)
+    private let accBtn = NSButton(title: "Grant", target: nil, action: nil)
+    private let modelBtn = NSButton(title: "Download", target: nil, action: nil)
+    private var timer: Timer?
+
+    convenience init(app: AppDelegate) {
+        let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 300),
+                           styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        win.title = "Welcome to WisprLite"; win.isReleasedWhenClosed = false
+        self.init(window: win); self.app = app; win.delegate = self
+
+        let title = NSTextField(labelWithString: "Welcome to WisprLite")
+        title.font = .systemFont(ofSize: 18, weight: .bold)
+        let subtitle = NSTextField(labelWithString: "Grant two permissions and download a model to start dictating.")
+        subtitle.font = .systemFont(ofSize: 12); subtitle.textColor = .secondaryLabelColor
+
+        micBtn.target = self; micBtn.action = #selector(grantMic)
+        accBtn.target = self; accBtn.action = #selector(grantAcc)
+        modelBtn.target = self; modelBtn.action = #selector(downloadStep)
+        for b in [micBtn, accBtn, modelBtn] { b.bezelStyle = .rounded }
+
+        let grid = NSGridView(views: [
+            [step("1. Microphone"), micStatus, micBtn],
+            [step("2. Accessibility"), accStatus, accBtn],
+            [step("3. Model"), modelStatus, modelBtn],
+        ])
+        grid.rowSpacing = 16; grid.columnSpacing = 14
+        grid.column(at: 0).xPlacement = .leading
+        for i in 0..<3 { grid.row(at: i).yPlacement = .center }
+
+        let done = NSButton(title: "Done", target: self, action: #selector(finish))
+        done.bezelStyle = .rounded; done.keyEquivalent = "\r"
+
+        let stack = NSStackView(views: [title, subtitle, grid, done])
+        stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 16
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        stack.edgeInsets = NSEdgeInsets(top: 24, left: 24, bottom: 24, right: 24)
+        win.contentView!.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: win.contentView!.leadingAnchor),
+            stack.topAnchor.constraint(equalTo: win.contentView!.topAnchor),
+        ])
+        win.center()
+        refresh()
+    }
+
+    private func step(_ s: String) -> NSTextField {
+        let l = NSTextField(labelWithString: s); l.font = .systemFont(ofSize: 13, weight: .medium)
+        l.widthAnchor.constraint(equalToConstant: 130).isActive = true
+        return l
+    }
+    private func setStatus(_ l: NSTextField, _ ok: Bool, _ pendingText: String? = nil) {
+        if let p = pendingText { l.stringValue = p; l.textColor = .secondaryLabelColor; return }
+        l.stringValue = ok ? "✓ Ready" : "✕ Not yet"
+        l.textColor = ok ? .systemGreen : .systemOrange
+        l.widthAnchor.constraint(equalToConstant: 110).isActive = true
+    }
+
+    func refresh() {
+        setStatus(micStatus, micGranted()); micBtn.isEnabled = !micGranted()
+        setStatus(accStatus, accessibilityGranted()); accBtn.isEnabled = !accessibilityGranted()
+        let key = app?.cfg.model ?? "multilingual"
+        if app?.downloading == true {
+            setStatus(modelStatus, false, "Downloading…"); modelBtn.isEnabled = false
+        } else {
+            let dl = modelDownloaded(key)
+            setStatus(modelStatus, dl); modelBtn.isEnabled = !dl
+        }
+    }
+
+    @objc private func grantMic() {
+        if AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined {
+            AVCaptureDevice.requestAccess(for: .audio) { _ in DispatchQueue.main.async { self.refresh() } }
+        } else { openPrivacyPane("Privacy_Microphone") }
+    }
+    @objc private func grantAcc() {
+        let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+        _ = AXIsProcessTrustedWithOptions(opts)
+        openPrivacyPane("Privacy_Accessibility")
+    }
+    @objc private func downloadStep() { app?.setModel(app?.cfg.model ?? "multilingual") }
+    @objc private func finish() { window?.close() }
+
+    func windowWillClose(_ notification: Notification) { timer?.invalidate(); timer = nil }
+
+    func show() {
+        refresh()
+        if timer == nil {
+            timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in self?.refresh() }
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        window?.makeKeyAndOrderFront(nil)
+    }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     let recorder = Recorder()
@@ -1092,6 +1302,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var capturing: Capturing = .none
     var settingsWC: SettingsWindowController?
     var dictWC: DictWindowController?
+    var onboardWC: OnboardWindowController?
     var overlay: PillOverlay?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -1108,9 +1319,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         recorder.deviceUID = cfg.inputDeviceUID
         recorder.boost = cfg.boostMic
         parakeet.onReady = { [weak self] in self?.setState(.ready) }
-        parakeet.start()
+        parakeet.start(modelPath: modelPath(modelInfo(cfg.model).file))
         checkPermissions()
         installEventTap()
+
+        // First run / incomplete setup → guide the user through permissions + model.
+        if !accessibilityGranted() || !modelDownloaded(cfg.model) { openOnboarding() }
+    }
+
+    func openOnboarding() {
+        if onboardWC == nil { onboardWC = OnboardWindowController(app: self) }
+        onboardWC?.show()
     }
 
     func applicationWillTerminate(_ notification: Notification) { parakeet.stop() }
@@ -1118,6 +1337,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applyOverlayConfig() {
         overlay?.configure(minimal: cfg.pillStyle == "minimal", appear: cfg.animAppear,
                            hide: cfg.animHide, hold: cfg.holdDuration)
+    }
+
+    private(set) var downloading = false
+
+    // Switch model: download if we don't have it yet, then (re)start the server on it.
+    func setModel(_ key: String, then: (() -> Void)? = nil) {
+        cfg.model = key; cfg.save(); buildMenu()
+        if modelDownloaded(key) { restartServer(); then?() }
+        else { downloadModel(modelInfo(key)) { [weak self] ok in if ok { self?.restartServer() }; then?() } }
+    }
+
+    func restartServer() {
+        setState(.warming)
+        let path = modelPath(modelInfo(cfg.model).file)
+        DispatchQueue.global().async { [weak self] in
+            self?.parakeet.stop()
+            self?.parakeet.start(modelPath: path)
+        }
+    }
+
+    func downloadModel(_ info: ModelInfo, done: @escaping (Bool) -> Void) {
+        downloading = true
+        setState(.warming)
+        settingsWC?.refresh(); onboardWC?.refresh()
+        DispatchQueue.global().async { [weak self] in
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
+            p.arguments = ["-L", "--fail", "-o", modelPath(info.file), info.url]
+            try? p.run(); p.waitUntilExit()
+            let ok = p.terminationStatus == 0
+            if !ok { try? FileManager.default.removeItem(atPath: modelPath(info.file)) }
+            DispatchQueue.main.async {
+                self?.downloading = false
+                self?.settingsWC?.refresh(); self?.onboardWC?.refresh()
+                logf("model download \(info.key): \(ok ? "ok" : "FAILED")")
+                done(ok)
+            }
+        }
     }
 
     func resetConfig() {
@@ -1130,24 +1387,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         settingsWC?.refresh()
     }
 
-    // Check permissions first; only prompt for the ones actually missing.
+    // Request mic once if undecided. Accessibility is guided by the onboarding window.
     func checkPermissions() {
-        switch AVCaptureDevice.authorizationStatus(for: .audio) {
-        case .notDetermined:
-            AVCaptureDevice.requestAccess(for: .audio) { _ in }   // ask once
-        case .denied, .restricted:
-            logf("mic permission missing — enable WisprLite in Privacy → Microphone")
-        default:
-            break                                                  // already granted → no prompt
+        if AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined {
+            AVCaptureDevice.requestAccess(for: .audio) { _ in }
         }
-
-        if AXIsProcessTrusted() {
-            logf("accessibility already granted")
-        } else {
-            logf("accessibility missing — prompting once")
-            let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
-            _ = AXIsProcessTrustedWithOptions(opts)                // system prompt shows only when untrusted
-        }
+        logf("accessibility \(AXIsProcessTrusted() ? "granted" : "missing")")
     }
 
     // CGEventTap: global keyboard listen gated by Accessibility only — no Input Monitoring
