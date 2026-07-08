@@ -196,7 +196,7 @@ final class History {
     }
     func add(_ text: String) {
         items.insert(text, at: 0)
-        if items.count > 100 { items = Array(items.prefix(100)) }
+        if items.count > 50 { items = Array(items.prefix(50)) }
         save()
     }
     func clear() { items = []; save() }
@@ -554,6 +554,7 @@ final class PillView: NSView {
 
     override var isFlipped: Bool { false }
 
+    private var lastVisible = false
     func tick() {
         let rate = presenceTarget > presence ? appearRate : hideRate
         presence += (presenceTarget - presence) * rate
@@ -561,7 +562,10 @@ final class PillView: NSView {
         let raw = (recStart != nil ? (levelProvider?() ?? 0) : 0)
         level += (raw - level) * 0.35          // smooth
         phase += 0.5
-        needsDisplay = true
+        // Only redraw while the pill is (or just became) visible — no 60 fps spin when idle.
+        let visible = presence > 0.003 || presenceTarget > 0.003
+        if visible || lastVisible { needsDisplay = true }
+        lastVisible = visible
     }
 
     // Recording started — fade the pill in, panel shows a live timer immediately.
@@ -1549,7 +1553,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if history.items.isEmpty {
             sub.addItem(withTitle: "(empty)", action: nil, keyEquivalent: "")
         } else {
-            for t in history.items.prefix(15) {
+            for t in history.items.prefix(12) {
                 let flat = t.replacingOccurrences(of: "\n", with: " ")
                 let title = flat.count > 44 ? String(flat.prefix(44)) + "…" : flat
                 let it = sub.addItem(withTitle: title, action: #selector(copyHistoryItem(_:)), keyEquivalent: "")
