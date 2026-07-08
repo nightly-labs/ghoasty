@@ -112,9 +112,15 @@ struct Config: Codable {
     var inputDeviceUID: String? = nil
     // Transcription engine.
     var engine: String = Engine.parakeet.rawValue
+    // Overlay: "full" (waveform + WPM) or "minimal" (voice indicator only).
+    var pillStyle: String = "full"
+    // Animation lerp rates (per frame): higher = snappier. Separate for appear / hide.
+    var animAppear: Double = 0.30
+    var animHide: Double = 0.30
 
     enum CodingKeys: String, CodingKey {
         case dictateChords, dictateEnterChords, languages, prompt, inputDeviceUID, engine
+        case pillStyle, animAppear, animHide
         case dictateKeys, dictateEnterKeys  // legacy
     }
 
@@ -133,6 +139,9 @@ struct Config: Codable {
         if let p = try? c.decode(String.self, forKey: .prompt) { prompt = p }
         if let u = try? c.decode(String?.self, forKey: .inputDeviceUID) { inputDeviceUID = u }
         if let e = try? c.decode(String.self, forKey: .engine) { engine = e }
+        if let s = try? c.decode(String.self, forKey: .pillStyle) { pillStyle = s }
+        if let x = try? c.decode(Double.self, forKey: .animAppear) { animAppear = x }
+        if let x = try? c.decode(Double.self, forKey: .animHide) { animHide = x }
     }
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
@@ -142,6 +151,9 @@ struct Config: Codable {
         try c.encode(prompt, forKey: .prompt)
         try c.encode(inputDeviceUID, forKey: .inputDeviceUID)
         try c.encode(engine, forKey: .engine)
+        try c.encode(pillStyle, forKey: .pillStyle)
+        try c.encode(animAppear, forKey: .animAppear)
+        try c.encode(animHide, forKey: .animHide)
     }
 
     static let url = FileManager.default.homeDirectoryForCurrentUser
@@ -452,66 +464,161 @@ final class Paster {
 // ---- Floating waveform pill overlay ----
 func lerp(_ a: CGFloat, _ b: CGFloat, _ t: CGFloat) -> CGFloat { a + (b - a) * t }
 
+// Polish plural for "słowo".
+func plWords(_ n: Int) -> String {
+    if n == 1 { return "słowo" }
+    let t = n % 10, h = n % 100
+    return (2...4).contains(t) && !(12...14).contains(h) ? "słowa" : "słów"
+}
+
 final class PillView: NSView {
-    var open: CGFloat = 0            // animated 0 (idle) … 1 (active)
-    var targetOpen: CGFloat = 0
     var level: CGFloat = 0           // smoothed mic level 0…1
     var levelProvider: (() -> CGFloat)?
     private var phase: CGFloat = 0
     private let bars = 18
+    private let pillCenterY: CGFloat = 55
 
-    private let idleW: CGFloat = 46,  idleH: CGFloat = 9
     private let activeW: CGFloat = 190, activeH: CGFloat = 54
+    private let statsW: CGFloat = 66
+
+    var minimal = false                 // voice indicator only (no WPM/timer panel)
+    var appearRate: CGFloat = 0.30      // fade-in speed
+    var hideRate: CGFloat = 0.30        // fade-out speed
+
+    // presence drives scale + opacity of the WHOLE pill as one unit (fade in / fade out).
+    private var presence: CGFloat = 0
+    private var presenceTarget: CGFloat = 0
+    private var wpmDisplay: CGFloat = 0     // animated count-up
+    private var wpmTarget: CGFloat = 0
+    private var statsToken = 0              // invalidates stale hide timers
+
+    // Panel shows a live timer while recording, then the final WPM.
+    private enum StatMode { case timer, wpm }
+    private var mode: StatMode = .timer
+    private var recStart: Date?
+    private var frozenElapsed: TimeInterval = 0
 
     override var isFlipped: Bool { false }
 
     func tick() {
-        open += (targetOpen - open) * 0.22
-        let raw = (targetOpen > 0.5 ? (levelProvider?() ?? 0) : 0)
+        let rate = presenceTarget > presence ? appearRate : hideRate
+        presence += (presenceTarget - presence) * rate
+        wpmDisplay += (wpmTarget - wpmDisplay) * 0.28
+        let raw = (recStart != nil ? (levelProvider?() ?? 0) : 0)
         level += (raw - level) * 0.35          // smooth
         phase += 0.5
         needsDisplay = true
     }
 
+    // Recording started — fade the pill in, panel shows a live timer immediately.
+    func setRecording() {
+        statsToken += 1
+        presenceTarget = 1
+        mode = .timer
+        recStart = Date()
+        wpmTarget = 0; wpmDisplay = 0
+    }
+
+    // Recording ended: freeze the timer until stats arrive.
+    func stopTimer() {
+        if let rs = recStart { frozenElapsed = Date().timeIntervalSince(rs) }
+        recStart = nil
+    }
+
+    // Fade the whole pill out now (cancels pending hide timers).
+    func shrink() {
+        statsToken += 1
+        presenceTarget = 0
+        recStart = nil
+    }
+
+    // Swap the live timer for the final WPM (count up), then fade the whole pill out.
+    func showStats(wpm: Int) {
+        statsToken += 1
+        let t = statsToken
+        mode = .wpm
+        recStart = nil
+        wpmTarget = CGFloat(wpm)
+        wpmDisplay = 0
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) { [weak self] in
+            guard let self, self.statsToken == t else { return }
+            self.presenceTarget = 0          // whole pill (waveform + number) fades together
+        }
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         guard let ctx = NSGraphicsContext.current?.cgContext else { return }
-        let a = max(0, min(1, open))
-        let w = lerp(idleW, activeW, a)
-        let h = lerp(idleH, activeH, a)
-        let cx = bounds.midX, cy = bounds.midY
-        let pill = CGRect(x: cx - w/2, y: cy - h/2, width: w, height: h)
-        let radius = h / 2
+        let p = max(0, min(1, presence))
+        guard p > 0.003 else { return }
+        let e = p * p * (3 - 2 * p)             // smoothstep
+        let scale = lerp(0.62, 1, e)            // whole pill shrinks toward its centre
+
+        let cy = pillCenterY
+        let h = activeH
+        let panelW = minimal ? 0 : statsW       // minimal → voice indicator only
+        let leftX = bounds.midX - activeW / 2   // waveform region is screen-centered
+        let divX = leftX + activeW
+        let pill = CGRect(x: leftX, y: cy - h / 2, width: activeW + panelW, height: h)
+        let anchorX = pill.midX
 
         ctx.saveGState()
-        ctx.setShadow(offset: CGSize(width: 0, height: -2),
-                      blur: 14 * a,
-                      color: NSColor.black.withAlphaComponent(0.4 * a).cgColor)
-        NSColor(white: 0.09, alpha: lerp(0.30, 0.97, a)).setFill()
-        NSBezierPath(roundedRect: pill, xRadius: radius, yRadius: radius).fill()
-        ctx.restoreGState()
+        ctx.translateBy(x: anchorX, y: cy)
+        ctx.scaleBy(x: scale, y: scale)
+        ctx.translateBy(x: -anchorX, y: -cy)
 
-        let barsAlpha = max(0, (a - 0.2) / 0.8)
-        guard barsAlpha > 0 else { return }
+        // pill background
+        ctx.setShadow(offset: CGSize(width: 0, height: -2), blur: 14 * p,
+                      color: NSColor.black.withAlphaComponent(0.4 * p).cgColor)
+        NSColor(white: 0.09, alpha: 0.97 * p).setFill()
+        NSBezierPath(roundedRect: pill, xRadius: h / 2, yRadius: h / 2).fill()
+        ctx.setShadow(offset: .zero, blur: 0, color: nil)
 
+        // waveform (left region)
         let padX: CGFloat = 22, padY: CGFloat = 12
-        let area = w - padX * 2
+        let area = activeW - padX * 2
         let slot = area / CGFloat(bars)
         let barW = slot * 0.42
         let maxH = h - padY * 2
-        let minH = barW                      // dot when silent
+        let minH = barW
         let mid = CGFloat(bars - 1) / 2
-
         for i in 0..<bars {
-            // symmetric center bump (tall middle, short edges) like a real meter
             let centerWeight = pow(cos((CGFloat(i) - mid) / mid * .pi / 2), 1.3)
             let wave = 0.55 + 0.45 * sin(phase * 0.25 + CGFloat(i) * 0.7)
             let energy = level * centerWeight * wave
             let bh = max(minH, minH + energy * (maxH - minH))
-            let x = pill.minX + padX + slot * CGFloat(i) + (slot - barW) / 2
-            let r = CGRect(x: x, y: cy - bh/2, width: barW, height: bh)
-            NSColor.white.withAlphaComponent(barsAlpha * (0.55 + 0.45 * centerWeight)).setFill()
-            NSBezierPath(roundedRect: r, xRadius: barW/2, yRadius: barW/2).fill()
+            let x = leftX + padX + slot * CGFloat(i) + (slot - barW) / 2
+            NSColor.white.withAlphaComponent(p * (0.55 + 0.45 * centerWeight)).setFill()
+            NSBezierPath(roundedRect: CGRect(x: x, y: cy - bh / 2, width: barW, height: bh),
+                         xRadius: barW / 2, yRadius: barW / 2).fill()
         }
+
+        // divider + stats (right region) — skipped entirely in minimal mode
+        guard !minimal else { ctx.restoreGState(); return }
+        NSColor.white.withAlphaComponent(0.14 * p).setFill()
+        NSBezierPath(rect: CGRect(x: divX - 0.5, y: cy - h / 2 + 9, width: 1, height: h - 18)).fill()
+
+        let numText: String, labelText: String
+        switch mode {
+        case .timer:
+            let el = recStart.map { Date().timeIntervalSince($0) } ?? frozenElapsed
+            numText = String(format: "%.1f", el); labelText = "sec"
+        case .wpm:
+            numText = "\(Int(wpmDisplay.rounded()))"; labelText = "wpm"
+        }
+        let numStr = NSAttributedString(string: numText, attributes: [
+            .font: NSFont.monospacedDigitSystemFont(ofSize: 18, weight: .semibold),
+            .foregroundColor: NSColor.white.withAlphaComponent(p)])
+        let lblStr = NSAttributedString(string: labelText, attributes: [
+            .font: NSFont.systemFont(ofSize: 9, weight: .medium),
+            .foregroundColor: NSColor.white.withAlphaComponent(0.5 * p)])
+        let ns = numStr.size(), ls = lblStr.size()
+        let cxs = divX + statsW / 2
+        let blockH = ns.height + ls.height
+        let lblY = cy - blockH / 2
+        numStr.draw(at: NSPoint(x: cxs - ns.width / 2, y: lblY + ls.height))
+        lblStr.draw(at: NSPoint(x: cxs - ls.width / 2, y: lblY))
+
+        ctx.restoreGState()
     }
 }
 
@@ -521,7 +628,7 @@ final class PillOverlay {
     private var timer: Timer?
 
     init(levelProvider: @escaping () -> CGFloat) {
-        let size = NSSize(width: 260, height: 90)
+        let size = NSSize(width: 340, height: 110)
         window = NSWindow(contentRect: NSRect(origin: .zero, size: size),
                           styleMask: .borderless, backing: .buffered, defer: false)
         window.isOpaque = false
@@ -545,12 +652,28 @@ final class PillOverlay {
         guard let screen = NSScreen.main else { return }
         let f = screen.frame
         let s = window.frame.size
-        window.setFrameOrigin(NSPoint(x: f.midX - s.width/2, y: f.minY + 34))
+        window.setFrameOrigin(NSPoint(x: f.midX - s.width/2, y: f.minY + 24))
     }
 
     func setActive(_ active: Bool) {
         reposition()
-        DispatchQueue.main.async { self.view.targetOpen = active ? 1 : 0 }
+        DispatchQueue.main.async { active ? self.view.setRecording() : self.view.shrink() }
+    }
+
+    func stopTimer() {
+        DispatchQueue.main.async { self.view.stopTimer() }
+    }
+
+    func showStats(wpm: Int) {
+        DispatchQueue.main.async { self.view.showStats(wpm: wpm) }
+    }
+
+    func configure(minimal: Bool, appear: Double, hide: Double) {
+        DispatchQueue.main.async {
+            self.view.minimal = minimal
+            self.view.appearRate = CGFloat(appear)
+            self.view.hideRate = CGFloat(hide)
+        }
     }
 }
 
@@ -567,6 +690,9 @@ final class SettingsWindowController: NSWindowController {
     private let addLangBtn = NSButton(title: "＋ Add language", target: nil, action: nil)
     private let micPopup = NSPopUpButton()
     private let enginePopup = NSPopUpButton()
+    private let stylePopup = NSPopUpButton()
+    private let appearSlider = NSSlider()
+    private let hideSlider = NSSlider()
 
     static func caption(_ s: String) -> NSTextField {
         let l = NSTextField(labelWithString: s)
@@ -577,7 +703,7 @@ final class SettingsWindowController: NSWindowController {
 
     convenience init(app: AppDelegate) {
         let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 520, height: 440),
+            contentRect: NSRect(x: 0, y: 0, width: 520, height: 540),
             styleMask: [.titled, .closable], backing: .buffered, defer: false)
         win.title = "WisprLite Settings"
         win.isReleasedWhenClosed = false
@@ -597,6 +723,13 @@ final class SettingsWindowController: NSWindowController {
         dictateAddBtn.title = "＋ Add combo"; enterAddBtn.title = "＋ Add combo"
         micPopup.target = self; micPopup.action = #selector(pickMic)
         enginePopup.target = self; enginePopup.action = #selector(pickEngine)
+        stylePopup.target = self; stylePopup.action = #selector(pickStyle)
+        for sl in [appearSlider, hideSlider] {
+            sl.minValue = 0.10; sl.maxValue = 0.55   // slow → fast (lerp rate)
+            sl.target = self; sl.action = #selector(changeAnim)
+            sl.controlSize = .small
+            sl.widthAnchor.constraint(equalToConstant: 150).isActive = true
+        }
 
         let grid = NSGridView(views: [
             [SettingsWindowController.caption("Engine"), enginePopup],
@@ -604,11 +737,14 @@ final class SettingsWindowController: NSWindowController {
             [SettingsWindowController.caption("Dictate + Enter"), enterChips],
             [SettingsWindowController.caption("Languages"), langChips],
             [SettingsWindowController.caption("Microphone"), micPopup],
+            [SettingsWindowController.caption("Overlay"), stylePopup],
+            [SettingsWindowController.caption("Appear speed"), appearSlider],
+            [SettingsWindowController.caption("Hide speed"), hideSlider],
         ])
-        grid.rowSpacing = 16
+        grid.rowSpacing = 15
         grid.columnSpacing = 16
         grid.column(at: 0).xPlacement = .trailing
-        for i in 0..<5 { grid.row(at: i).yPlacement = .center }
+        for i in 0..<8 { grid.row(at: i).yPlacement = .center }
 
         let hint = NSTextField(wrappingLabelWithString:
             "Engine: Parakeet auto-detects language & punctuates (Languages row is ignored). Whisper uses the Languages whitelist. "
@@ -669,6 +805,15 @@ final class SettingsWindowController: NSWindowController {
         enginePopup.lastItem?.representedObject = Engine.whisper.rawValue
         enginePopup.selectItem(at: app?.cfg.engine == Engine.whisper.rawValue ? 1 : 0)
 
+        stylePopup.removeAllItems()
+        stylePopup.addItem(withTitle: "Full — waveform + words/min")
+        stylePopup.lastItem?.representedObject = "full"
+        stylePopup.addItem(withTitle: "Minimal — voice indicator only")
+        stylePopup.lastItem?.representedObject = "minimal"
+        stylePopup.selectItem(at: app?.cfg.pillStyle == "minimal" ? 1 : 0)
+        appearSlider.doubleValue = app?.cfg.animAppear ?? 0.30
+        hideSlider.doubleValue = app?.cfg.animHide ?? 0.30
+
         micPopup.removeAllItems()
         micPopup.addItem(withTitle: "Built-in mic (recommended)")
         micPopup.lastItem?.representedObject = nil
@@ -696,6 +841,19 @@ final class SettingsWindowController: NSWindowController {
         guard let raw = sender.selectedItem?.representedObject as? String,
               let e = Engine(rawValue: raw) else { return }
         app?.setEngine(e)
+    }
+
+    @objc func pickStyle(_ sender: NSPopUpButton) {
+        guard let app, let s = sender.selectedItem?.representedObject as? String else { return }
+        app.cfg.pillStyle = s
+        app.cfg.save(); app.applyOverlayConfig(); app.buildMenu()
+    }
+
+    @objc func changeAnim(_ sender: NSSlider) {
+        guard let app else { return }
+        app.cfg.animAppear = appearSlider.doubleValue
+        app.cfg.animHide = hideSlider.doubleValue
+        app.cfg.save(); app.applyOverlayConfig()
     }
 
     private func langChip(_ code: String) -> NSButton {
@@ -759,6 +917,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var pendingEnter = false
     var activeChord: Mods?
     var captureMask: Mods = []
+    var recordStart = Date()
     var capturing: Capturing = .none
     var settingsWC: SettingsWindowController?
     var overlay: PillOverlay?
@@ -767,6 +926,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         setIcon("🎙️")
         buildMenu()
         overlay = PillOverlay(levelProvider: { [weak self] in self?.recorder.level() ?? 0 })
+        applyOverlayConfig()
         recorder.deviceUID = cfg.inputDeviceUID
         engines.start(Engine(rawValue: cfg.engine) ?? .parakeet, prompt: cfg.prompt)
         checkPermissions()
@@ -774,6 +934,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) { engines.stop() }
+
+    func applyOverlayConfig() {
+        overlay?.configure(minimal: cfg.pillStyle == "minimal", appear: cfg.animAppear, hide: cfg.animHide)
+    }
 
     func setEngine(_ engine: Engine) {
         cfg.engine = engine.rawValue
@@ -870,6 +1034,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         isRecording = true
         pendingEnter = enter
         activeChord = chord
+        recordStart = Date()
         setIcon(enter ? "🔴↵" : "🔴")
         overlay?.setActive(true)
         recorder.start()
@@ -880,11 +1045,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         isRecording = false
         activeChord = nil
         let enter = pendingEnter
-        overlay?.setActive(false)
+        // Keep the pill open through transcription so we can reveal WPM inline on the right.
         setIcon("⏳")
-        guard let wav = recorder.stop() else { setIcon("🎙️"); return }
+        overlay?.stopTimer()   // freeze the live timer; WPM replaces it after transcription
+        guard let wav = recorder.stop() else { overlay?.setActive(false); setIcon("🎙️"); return }
         let langs = cfg.languages
         let engine = engines.engine
+        let seconds = Date().timeIntervalSince(recordStart)
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             let text = self.transcriber.transcribe(wav, engine: engine, languages: langs)
@@ -892,6 +1059,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 logf("TRANSCRIPT len=\(text.count) trusted=\(AXIsProcessTrusted()) text='\(text.prefix(80))'")
                 self.paster.paste(text, pressEnter: enter)
                 self.setIcon("🎙️")
+                let words = text.split { $0 == " " || $0 == "\n" || $0 == "\t" }.count
+                let wpm = seconds > 0.5 ? Int((Double(words) / (seconds / 60)).rounded()) : 0
+                if self.cfg.pillStyle == "full", words > 0, wpm > 0 {
+                    self.overlay?.showStats(wpm: wpm)   // reveal WPM, then fade out
+                } else {
+                    self.overlay?.setActive(false)      // minimal / nothing → fade out now
+                }
             }
         }
     }
