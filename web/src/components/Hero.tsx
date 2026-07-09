@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { AsciiTexture } from './AsciiTexture'
 import { MeshBackground } from './MeshBackground'
 
@@ -18,7 +18,7 @@ function AppleGlyph() {
 
 function XGlyph() {
   return (
-    <svg viewBox="0 0 24 24" aria-hidden="true" className="h-5 w-5 fill-current">
+    <svg viewBox="0 0 24 24" aria-hidden="true" className="h-[18px] w-[18px] fill-current">
       <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24h-6.66l-5.214-6.817-5.966 6.817H1.68l7.73-8.835L1.254 2.25h6.83l4.713 6.231 5.447-6.231zm-1.161 17.52h1.833L7.084 4.126H5.117l11.966 15.644z" />
     </svg>
   )
@@ -26,9 +26,36 @@ function XGlyph() {
 
 function TelegramGlyph() {
   return (
-    <svg viewBox="0 0 24 24" aria-hidden="true" className="h-5 w-5 fill-current">
+    <svg viewBox="0 0 24 24" aria-hidden="true" className="h-[18px] w-[18px] fill-current">
       <path d="M23.91 3.79 20.3 20.84c-.25 1.21-.98 1.5-2 .94l-5.5-4.07-2.66 2.57c-.3.3-.55.56-1.1.56-.72 0-.6-.27-.84-.95L6.3 13.7l-5.45-1.7c-1.18-.35-1.19-1.16.26-1.75l21.26-8.2c.97-.43 1.9.24 1.53 1.73z" />
     </svg>
+  )
+}
+
+function SocialLink({
+  href,
+  label,
+  tooltip,
+  children,
+}: {
+  href: string
+  label: string
+  tooltip: string
+  children: ReactNode
+}) {
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      aria-label={label}
+      className="group relative flex h-10 w-10 items-center justify-center rounded-full bg-black/25 text-white/80 ring-1 ring-white/15 backdrop-blur-xl transition duration-150 hover:bg-black/35 hover:text-white active:scale-[0.95]"
+    >
+      {children}
+      <span className="pointer-events-none absolute bottom-full left-1/2 mb-2 -translate-x-1/2 translate-y-1 rounded-md bg-black/70 px-2 py-1 text-xs font-medium whitespace-nowrap text-white/90 opacity-0 ring-1 ring-white/10 backdrop-blur-md transition duration-150 group-hover:translate-y-0 group-hover:opacity-100">
+        {tooltip}
+      </span>
+    </a>
   )
 }
 
@@ -62,25 +89,13 @@ export function Hero() {
       </header>
 
       {/* Social links */}
-      <div className="t-stagger-line t-stagger-line--7 absolute bottom-0 right-0 z-10 flex items-center gap-4 p-6 sm:p-8">
-        <a
-          href="https://x.com/norbertbodziony"
-          target="_blank"
-          rel="noopener noreferrer"
-          aria-label="X (Twitter)"
-          className="text-white/45 transition-colors hover:text-white"
-        >
+      <div className="t-fade absolute bottom-0 right-0 z-10 flex items-center gap-2.5 p-6 sm:p-8">
+        <SocialLink href="https://x.com/norbertbodziony" label="X (Twitter)" tooltip="@norbertbodziony">
           <XGlyph />
-        </a>
-        <a
-          href="https://t.me/norbertbodziony"
-          target="_blank"
-          rel="noopener noreferrer"
-          aria-label="Telegram"
-          className="text-white/45 transition-colors hover:text-white"
-        >
+        </SocialLink>
+        <SocialLink href="https://t.me/norbertbodziony" label="Telegram" tooltip="@norbertbodziony">
           <TelegramGlyph />
-        </a>
+        </SocialLink>
       </div>
 
       <div className="relative flex min-h-screen flex-col items-center justify-center px-6 py-24 text-center">

@@ -6,7 +6,7 @@ cd "$(dirname "$0")"
 
 APP="Ghoasty.app"
 BIN="Ghoasty"
-VERSION="1.0"                                   # marketing version — bump by hand for releases
+VERSION="1.1"                                   # marketing version — bump by hand for releases
 BUILD="$(git rev-list --count HEAD 2>/dev/null || echo 1)"   # monotonic build no. for Sparkle; auto-increments each commit
 BUNDLE_ID="com.akudama.ghoasty"
 PK_MODEL="models/parakeet-tdt-0.6b-v3-f16.gguf"

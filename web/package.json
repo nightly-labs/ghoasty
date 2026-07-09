@@ -9,6 +9,7 @@
     "dev": "NITRO_PRESET=node-server vite dev --port 3000",
     "generate-routes": "tsr generate",
     "build": "vite build",
+    "deploy": "vite build && npx wrangler deploy -c .output/server/wrangler.json",
     "preview": "vite preview",
     "test": "vitest run"
   },

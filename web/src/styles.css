@@ -78,12 +78,27 @@ body {
 .t-stagger-line--4 { transition-delay: calc(var(--stagger-stagger) * 3); }
 .t-stagger-line--5 { transition-delay: calc(var(--stagger-stagger) * 4); }
 .t-stagger-line--6 { transition-delay: calc(var(--stagger-stagger) * 5); }
-.t-stagger-line--7 { transition-delay: calc(var(--stagger-stagger) * 6); }
 
 .t-stagger.is-shown .t-stagger-line {
   opacity: 1;
   transform: translateY(0);
   filter: blur(0);
+}
+
+/* Opacity-only fade-in: no transform/filter/will-change, so descendant
+   backdrop-filter (the frosted social chips) still samples the page. */
+.t-fade {
+  opacity: 0;
+  transition: opacity var(--stagger-dur) var(--stagger-ease);
+  transition-delay: calc(var(--stagger-stagger) * 6);
+}
+.t-stagger.is-shown .t-fade {
+  opacity: 1;
+}
+@media (prefers-reduced-motion: reduce) {
+  .t-fade {
+    transition: none !important;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
