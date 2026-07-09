@@ -16,6 +16,22 @@ function AppleGlyph() {
   )
 }
 
+function XGlyph() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" className="h-5 w-5 fill-current">
+      <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24h-6.66l-5.214-6.817-5.966 6.817H1.68l7.73-8.835L1.254 2.25h6.83l4.713 6.231 5.447-6.231zm-1.161 17.52h1.833L7.084 4.126H5.117l11.966 15.644z" />
+    </svg>
+  )
+}
+
+function TelegramGlyph() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" className="h-5 w-5 fill-current">
+      <path d="M23.91 3.79 20.3 20.84c-.25 1.21-.98 1.5-2 .94l-5.5-4.07-2.66 2.57c-.3.3-.55.56-1.1.56-.72 0-.6-.27-.84-.95L6.3 13.7l-5.45-1.7c-1.18-.35-1.19-1.16.26-1.75l21.26-8.2c.97-.43 1.9.24 1.53 1.73z" />
+    </svg>
+  )
+}
+
 export function Hero() {
   // Play the staggered entrance on mount. SSR renders the pre-reveal state
   // (shown=false), matching the first client render → no hydration mismatch.
@@ -40,10 +56,32 @@ export function Hero() {
           alt="Ghoasty"
           width={36}
           height={36}
-          className="h-9 w-9 rounded-[10px] shadow-lg shadow-black/40"
+          className="h-10 w-10 rounded-[11px] shadow-lg shadow-black/40"
         />
-        <span className="text-lg font-semibold tracking-tight">Ghoasty</span>
+        <span className="text-xl font-semibold tracking-tight">Ghoasty</span>
       </header>
+
+      {/* Social links */}
+      <div className="t-stagger-line t-stagger-line--7 absolute bottom-0 right-0 z-10 flex items-center gap-4 p-6 sm:p-8">
+        <a
+          href="https://x.com/norbertbodziony"
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label="X (Twitter)"
+          className="text-white/45 transition-colors hover:text-white"
+        >
+          <XGlyph />
+        </a>
+        <a
+          href="https://t.me/norbertbodziony"
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label="Telegram"
+          className="text-white/45 transition-colors hover:text-white"
+        >
+          <TelegramGlyph />
+        </a>
+      </div>
 
       <div className="relative flex min-h-screen flex-col items-center justify-center px-6 py-24 text-center">
         <h1 className="text-5xl font-semibold leading-[0.95] tracking-tight sm:text-7xl lg:text-8xl">
@@ -52,31 +90,32 @@ export function Hero() {
             Nothing leaves your Mac.
           </span>
         </h1>
-        <p className="t-stagger-line t-stagger-line--4 mt-6 max-w-xl text-base text-balance text-white/60 sm:text-lg">
-          On-device push-to-talk dictation for macOS. Hold, speak, release — transcribed
+        <p className="t-stagger-line t-stagger-line--4 mt-8 max-w-2xl text-lg text-balance text-white/60 sm:text-xl">
+          On-device push-to-talk dictation for macOS. Hold, speak, release, transcribed
           locally in a blink and pasted right where your cursor is. Private by design, and
           we never sell your data.
         </p>
 
-        <div className="t-stagger-line t-stagger-line--5 mt-9 flex flex-col items-center gap-3">
+        <div className="t-stagger-line t-stagger-line--5 mt-11 flex flex-col items-center gap-3.5">
           <a
-            href="#"
-            className="group inline-flex items-center gap-2.5 rounded-full bg-white px-6 py-3.5 text-base font-medium text-black transition-transform duration-150 hover:scale-[1.02] active:scale-[0.99]"
+            href="https://updates.ghoasty.ai/Ghoasty.dmg"
+            download
+            className="group inline-flex items-center gap-2.5 rounded-full bg-white px-8 py-4.5 text-lg font-medium text-black transition-transform duration-150 hover:scale-[1.02] active:scale-[0.99]"
           >
             <AppleGlyph />
             Download for macOS
           </a>
-          <span className="text-sm text-white/40">Apple Silicon · macOS 13+ · free</span>
+          <span className="text-base text-white/40">Apple Silicon · macOS 13+ · free</span>
         </div>
 
         {/* Stats */}
-        <dl className="t-stagger-line t-stagger-line--6 mt-16 flex justify-center gap-10 sm:gap-14">
+        <dl className="t-stagger-line t-stagger-line--6 mt-20 flex justify-center gap-12 sm:gap-16">
           {STATS.map((s) => (
             <div key={s.label}>
-              <dt className="font-mono text-3xl tabular-nums tracking-tight text-white sm:text-4xl">
+              <dt className="font-mono text-4xl tabular-nums tracking-tight text-white sm:text-5xl">
                 {s.value}
               </dt>
-              <dd className="mt-1 text-sm text-white/45">{s.label}</dd>
+              <dd className="mt-1.5 text-base text-white/45">{s.label}</dd>
             </div>
           ))}
         </dl>

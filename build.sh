@@ -6,14 +6,14 @@ cd "$(dirname "$0")"
 
 APP="Ghoasty.app"
 BIN="Ghoasty"
-VERSION="1.0"
-BUILD="1"
+VERSION="1.0"                                   # marketing version — bump by hand for releases
+BUILD="$(git rev-list --count HEAD 2>/dev/null || echo 1)"   # monotonic build no. for Sparkle; auto-increments each commit
 BUNDLE_ID="com.akudama.ghoasty"
 PK_MODEL="models/parakeet-tdt-0.6b-v3-f16.gguf"
 PK_MODEL_URL="https://huggingface.co/mudler/parakeet-cpp-gguf/resolve/main/tdt-0.6b-v3-f16.gguf"
 # Sparkle public EdDSA key — filled in from setup-sparkle.sh output. Empty = updates disabled.
-SU_FEED_URL="https://updates.akudama.com/ghoasty/appcast.xml"
-SU_PUBLIC_ED_KEY="${SU_PUBLIC_ED_KEY:-}"
+SU_FEED_URL="https://updates.ghoasty.ai/appcast.xml"
+SU_PUBLIC_ED_KEY="${SU_PUBLIC_ED_KEY:-LUBuPY2qamW1lrdak4QXEGJq/Oa1ygOM60m1CxK5438=}"
 
 # 1. model — kept beside the app in dev; dist.sh bundles it into the app
 mkdir -p models
@@ -28,7 +28,7 @@ if [ ! -x parakeet.cpp/build/examples/server/parakeet-server ]; then
   [ -d parakeet.cpp ] || git clone --depth 1 https://github.com/mudler/parakeet.cpp
   ( cd parakeet.cpp \
     && git submodule update --init --recursive --depth 1 \
-    && cmake -B build -DPARAKEET_BUILD_CLI=ON -DPARAKEET_BUILD_SERVER=ON -DPARAKEET_GGML_METAL=ON \
+    && cmake -B build -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 -DPARAKEET_BUILD_CLI=ON -DPARAKEET_BUILD_SERVER=ON -DPARAKEET_GGML_METAL=ON \
     && cmake --build build -j )
 fi
 
@@ -41,7 +41,7 @@ if [ -d "Frameworks/Sparkle.framework" ]; then
   SPARKLE_FLAGS=(-F Frameworks -framework Sparkle
                  -Xlinker -rpath -Xlinker "@loader_path/../Frameworks")
 fi
-swiftc -O Sources/main.swift -o "build/$BIN" \
+swiftc -O -target arm64-apple-macos13.0 Sources/main.swift -o "build/$BIN" \
   -framework AppKit -framework AVFoundation ${SPARKLE_FLAGS[@]+"${SPARKLE_FLAGS[@]}"}
 
 # 3. assemble .app bundle

@@ -78,6 +78,7 @@ body {
 .t-stagger-line--4 { transition-delay: calc(var(--stagger-stagger) * 3); }
 .t-stagger-line--5 { transition-delay: calc(var(--stagger-stagger) * 4); }
 .t-stagger-line--6 { transition-delay: calc(var(--stagger-stagger) * 5); }
+.t-stagger-line--7 { transition-delay: calc(var(--stagger-stagger) * 6); }
 
 .t-stagger.is-shown .t-stagger-line {
   opacity: 1;

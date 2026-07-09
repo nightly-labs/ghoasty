@@ -13,6 +13,10 @@ elaborate.log
 
 # Sparkle framework + generated keys — fetched by setup-sparkle.sh
 Frameworks/
+# Sparkle private signing key — NEVER commit; back up to a vault instead
+sparkle_private_key.txt
+# Sparkle release artifacts (DMGs + appcast) — uploaded to R2, not versioned
+releases/
 
 # code-signing cert — machine-specific, regenerated locally (see README)
 *.pem

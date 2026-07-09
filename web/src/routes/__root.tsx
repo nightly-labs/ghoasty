@@ -2,7 +2,7 @@ import { HeadContent, Scripts, createRootRoute } from '@tanstack/react-router'
 
 import appCss from '../styles.css?url'
 
-const TITLE = 'Ghoasty — private, on-device dictation for macOS'
+const TITLE = 'Ghoasty: private, on-device dictation for macOS'
 const DESCRIPTION =
   'Push-to-talk dictation for macOS that runs entirely on your Mac. ~10× faster than the cloud, and we never sell your data.'
 

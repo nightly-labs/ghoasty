@@ -98,6 +98,25 @@ rm -rf "$STAGE"
 xcrun notarytool submit "$DMG" --keychain-profile "$NOTARY_PROFILE" --wait
 xcrun stapler staple "$DMG"
 
+# 6. update the Sparkle appcast for auto-updates.
+#    Versioned DMGs accumulate in releases/ so generate_appcast can build the
+#    version history (and binary deltas). It signs each DMG with the EdDSA
+#    private key in the login keychain and writes releases/appcast.xml.
+#    Upload the whole releases/ folder to the bucket behind $SU_FEED_URL.
+GEN="Frameworks/bin/generate_appcast"
+if [ -x "$GEN" ]; then
+  VER=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Contents/Info.plist")
+  BUILD=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$APP/Contents/Info.plist")
+  echo "==> updating appcast (version $VER, build $BUILD)"
+  mkdir -p releases
+  cp "$DMG" "releases/Ghoasty-$VER.dmg"
+  "$GEN" --download-url-prefix "https://updates.ghoasty.ai/" releases/
+  echo "    appcast: $PWD/releases/appcast.xml"
+  echo "    To publish (upload DMG + appcast to R2): ./publish.sh"
+else
+  echo "==> Sparkle not set up (run ./setup-sparkle.sh) — skipping appcast"
+fi
+
 echo "==> done"
 echo "    App: $PWD/$APP  (stapled)"
 echo "    DMG: $PWD/$DMG  (stapled, ready to share)"

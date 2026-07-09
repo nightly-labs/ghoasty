@@ -1,0 +1,7 @@
+{
+  // Worker name + compat pinned here; Nitro's cloudflare-module preset merges
+  // this with generated `main`/`assets`/`rules` into .output/server/wrangler.json.
+  "name": "ghoasty-web",
+  "compatibility_date": "2026-07-09",
+  "compatibility_flags": ["nodejs_compat"]
+}
