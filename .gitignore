@@ -31,3 +31,6 @@ parakeet.cpp/
 parakeet-env/
 
 .codex-tmp/
+
+# Playwright MCP scratch output
+web/.playwright-mcp/

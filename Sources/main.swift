@@ -7,7 +7,7 @@ import ServiceManagement
 import Sparkle   // auto-update; only linked in the production build (see setup-sparkle.sh)
 #endif
 
-// Ghoasty — push-to-talk local dictation.
+// Ghoasty - push-to-talk local dictation.
 // Hold a bound modifier to record, release to transcribe (Parakeet) and paste.
 // Two bindings: plain dictate, and dictate+Enter (presses Return after pasting).
 
@@ -21,7 +21,7 @@ func ensureDataDir() {
     try? FileManager.default.createDirectory(at: DATA_DIR, withIntermediateDirectories: true)
 }
 
-// Where downloaded (non-default) models land — always writable, unlike /Applications.
+// Where downloaded (non-default) models land - always writable, unlike /Applications.
 let DOWNLOAD_MODELS_DIR = DATA_DIR.appendingPathComponent("models").path
 // Search order: user downloads, then the model bundled in the app, then the dev build tree.
 let MODEL_SEARCH_DIRS = [
@@ -49,11 +49,11 @@ let MODELS: [ModelInfo] = [
     ModelInfo(key: "multilingual",
               file: "parakeet-tdt-0.6b-v3-f16.gguf",
               url: "https://huggingface.co/mudler/parakeet-cpp-gguf/resolve/main/tdt-0.6b-v3-f16.gguf",
-              label: "Multilingual (v3) — 25 languages"),
+              label: "Multilingual (v3) - 25 languages"),
     ModelInfo(key: "english",
               file: "parakeet-tdt-0.6b-v2-f16.gguf",
               url: "https://huggingface.co/mudler/parakeet-cpp-gguf/resolve/main/tdt-0.6b-v2-f16.gguf",
-              label: "English only (v2) — best for English"),
+              label: "English only (v2) - best for English"),
 ]
 func modelInfo(_ key: String) -> ModelInfo { MODELS.first { $0.key == key } ?? MODELS[0] }
 func modelDownloaded(_ key: String) -> Bool { existingModelPath(modelInfo(key).file) != nil }
@@ -106,7 +106,7 @@ struct Mods: OptionSet {
         if contains(.shift) { s += "⇧" }
         if contains(.cmd)   { s += "⌘" }
         if contains(.fn)    { s += "fn" }
-        return s.isEmpty ? "—" : s
+        return s.isEmpty ? "-" : s
     }
 }
 
@@ -276,7 +276,7 @@ func deviceStringProp(_ dev: AudioDeviceID, _ selector: AudioObjectPropertySelec
 func deviceUID(_ dev: AudioDeviceID) -> String? { deviceStringProp(dev, kAudioDevicePropertyDeviceUID) }
 func deviceName(_ dev: AudioDeviceID) -> String { deviceStringProp(dev, kAudioObjectPropertyName) ?? "Unknown" }
 
-// Built-in mic — default so we never open the Bluetooth headset's mic (which would force
+// Built-in mic - default so we never open the Bluetooth headset's mic (which would force
 // AirPods from high-quality A2DP playback into low-quality HFP call mode).
 func builtInInputDeviceID() -> AudioDeviceID? {
     allAudioDevices().first { deviceHasInput($0) && deviceTransport($0) == kAudioDeviceTransportTypeBuiltIn }
@@ -300,7 +300,7 @@ final class Recorder {
     private var curLevel: CGFloat = 0
     private var running = false
 
-    // On-disk WAV: 16 kHz mono PCM16 — what Parakeet wants.
+    // On-disk WAV: 16 kHz mono PCM16 - what Parakeet wants.
     private let fileSettings: [String: Any] = [
         AVFormatIDKey: Int(kAudioFormatLinearPCM),
         AVSampleRateKey: 16000.0,
@@ -319,7 +319,7 @@ final class Recorder {
             AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice,
                                  kAudioUnitScope_Global, 0, &d, UInt32(MemoryLayout<AudioDeviceID>.size))
         } else {
-            logf("no capture device resolved — using default input")
+            logf("no capture device resolved - using default input")
         }
 
         let inFormat = input.inputFormat(forBus: 0)
@@ -329,7 +329,7 @@ final class Recorder {
             logf("could not open output file"); return
         }
         file = f
-        // write() requires buffers in the file's processingFormat — convert to THAT, not a
+        // write() requires buffers in the file's processingFormat - convert to THAT, not a
         // custom int16 format (mismatch there aborts inside AVAudioFile.write).
         writeFormat = f.processingFormat
         converter = AVAudioConverter(from: inFormat, to: f.processingFormat)
@@ -405,7 +405,7 @@ final class ParakeetServer {
         ready = false
         guard FileManager.default.fileExists(atPath: PARAKEET_SERVER_BIN),
               FileManager.default.fileExists(atPath: modelPath) else {
-            logf("parakeet-server or model missing — run build.sh / download model"); return
+            logf("parakeet-server or model missing - run build.sh / download model"); return
         }
         // Clear any orphaned server (e.g. from a previous crash) so port 8090 is free.
         let kill = Process()
@@ -496,7 +496,7 @@ final class Transcriber {
         guard let audio = try? Data(contentsOf: wav) else { return nil }
         for attempt in 0..<4 {
             if let text = post(audio) { return text }
-            if attempt < 3 { usleep(500_000) }   // server likely still loading — wait & retry
+            if attempt < 3 { usleep(500_000) }   // server likely still loading - wait & retry
         }
         return nil
     }
@@ -622,13 +622,13 @@ final class PillView: NSView {
         let raw = (recStart != nil ? (levelProvider?() ?? 0) : 0)
         level += (raw - level) * 0.35          // smooth
         phase += 0.5
-        // Only redraw while the pill is (or just became) visible — no 60 fps spin when idle.
+        // Only redraw while the pill is (or just became) visible - no 60 fps spin when idle.
         let visible = presence > 0.003 || presenceTarget > 0.003
         if visible || lastVisible { needsDisplay = true }
         lastVisible = visible
     }
 
-    // Recording started — fade the pill in, panel shows a live timer immediately.
+    // Recording started - fade the pill in, panel shows a live timer immediately.
     func setRecording() {
         statsToken += 1
         presenceTarget = 1
@@ -726,7 +726,7 @@ final class PillView: NSView {
                          xRadius: barW / 2, yRadius: barW / 2).fill()
         }
 
-        // divider + stats (right region) — skipped entirely in minimal mode
+        // divider + stats (right region) - skipped entirely in minimal mode
         guard !minimal else { ctx.restoreGState(); return }
         NSColor.white.withAlphaComponent(0.14 * p).setFill()
         NSBezierPath(rect: CGRect(x: divX - 0.5, y: cy - h / 2 + 9, width: 1, height: h - 18)).fill()
@@ -890,6 +890,24 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         return l
     }
 
+    // Borderless underlined link, styled like an inline hyperlink.
+    static func linkButton(_ title: String, target: AnyObject, action: Selector) -> NSButton {
+        let b = NSButton(title: title, target: target, action: action)
+        b.isBordered = false
+        b.attributedTitle = NSAttributedString(string: title, attributes: [
+            .foregroundColor: NSColor.linkColor,
+            .font: NSFont.systemFont(ofSize: 11),
+            .underlineStyle: NSUnderlineStyle.single.rawValue,
+        ])
+        return b
+    }
+    @objc private func openTwitter() {
+        if let u = URL(string: "https://x.com/norbertbodziony") { NSWorkspace.shared.open(u) }
+    }
+    @objc private func openTelegram() {
+        if let u = URL(string: "https://t.me/norbertbodziony") { NSWorkspace.shared.open(u) }
+    }
+
     // Editable ms field: user can drag the slider or type an exact value.
     static func valueField() -> NSTextField {
         let f = NSTextField(string: "")
@@ -992,7 +1010,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         for i in 0..<15 { grid.row(at: i).yPlacement = .center }
 
         let hint = NSTextField(wrappingLabelWithString:
-            "Hotkeys: add modifier combos (⌥, ⌘⇧, ⌃⌥, Fn…) — any starts dictation; “Dictate + Enter” also presses Return. "
+            "Hotkeys: add modifier combos (⌥, ⌘⇧, ⌃⌥, Fn…) - any starts dictation; “Dictate + Enter” also presses Return. "
             + "Parakeet auto-detects the language and adds punctuation. "
             + "Microphone: built-in keeps Bluetooth output in high quality. Click a chip to remove it.")
         hint.font = .systemFont(ofSize: 11)
@@ -1001,7 +1019,19 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         let resetBtn = NSButton(title: "Reset to defaults", target: self, action: #selector(resetDefaults))
         resetBtn.bezelStyle = .rounded
 
-        let stack = NSStackView(views: [grid, hint, resetBtn])
+        // Footer: version + social links.
+        let info = Bundle.main.infoDictionary
+        let ver = info?["CFBundleShortVersionString"] as? String ?? "?"
+        let build = info?["CFBundleVersion"] as? String ?? "?"
+        let verLabel = SettingsWindowController.caption("Ghoasty \(ver) (\(build))")
+        verLabel.font = .systemFont(ofSize: 11)
+        verLabel.textColor = .tertiaryLabelColor
+        let xLink = SettingsWindowController.linkButton("X", target: self, action: #selector(openTwitter))
+        let tgLink = SettingsWindowController.linkButton("Telegram", target: self, action: #selector(openTelegram))
+        let footer = NSStackView(views: [verLabel, xLink, tgLink])
+        footer.orientation = .horizontal; footer.spacing = 12; footer.alignment = .centerY
+
+        let stack = NSStackView(views: [grid, hint, resetBtn, footer])
         stack.orientation = .vertical
         stack.alignment = .centerX
         stack.spacing = 12
@@ -1042,9 +1072,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         enterChips.addArrangedSubview(enterAddBtn)
 
         stylePopup.removeAllItems()
-        stylePopup.addItem(withTitle: "Full — waveform + words/min")
+        stylePopup.addItem(withTitle: "Full - waveform + words/min")
         stylePopup.lastItem?.representedObject = "full"
-        stylePopup.addItem(withTitle: "Minimal — voice indicator only")
+        stylePopup.addItem(withTitle: "Minimal - voice indicator only")
         stylePopup.lastItem?.representedObject = "minimal"
         stylePopup.selectItem(at: app?.cfg.pillStyle == "minimal" ? 1 : 0)
         appearSlider.doubleValue = app?.cfg.animAppear ?? 0.30
@@ -1208,7 +1238,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         commitAnim()
     }
 
-    // User typed an exact ms value — convert back to the slider's internal unit, clamp, sync.
+    // User typed an exact ms value - convert back to the slider's internal unit, clamp, sync.
     @objc func editAnimValue(_ sender: NSTextField) {
         let ms = Int(sender.stringValue.filter { $0.isNumber }) ?? 0
         if sender === holdVal {
@@ -1357,14 +1387,14 @@ final class OnboardWindowController: NSWindowController, NSWindowDelegate {
     private var timer: Timer?
 
     convenience init(app: AppDelegate) {
-        let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 360),
+        let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 360),
                            styleMask: [.titled, .closable], backing: .buffered, defer: false)
         win.title = "Welcome to Ghoasty"; win.isReleasedWhenClosed = false
         self.init(window: win); self.app = app; win.delegate = self
 
         let title = NSTextField(labelWithString: "Welcome to Ghoasty")
         title.font = .systemFont(ofSize: 18, weight: .bold)
-        let subtitle = NSTextField(labelWithString: "Grant two permissions — the model downloads automatically.")
+        let subtitle = NSTextField(labelWithString: "Grant two permissions - the model downloads automatically.")
         subtitle.font = .systemFont(ofSize: 12); subtitle.textColor = .secondaryLabelColor
 
         micBtn.target = self; micBtn.action = #selector(grantMic)
@@ -1372,10 +1402,15 @@ final class OnboardWindowController: NSWindowController, NSWindowDelegate {
         modelBtn.target = self; modelBtn.action = #selector(downloadStep)
         hotkeyBtn.target = self; hotkeyBtn.action = #selector(customizeHotkeys)
         for b in [micBtn, accBtn, modelBtn, hotkeyBtn] { b.bezelStyle = .rounded }
+        // Status column: fixed width once, wide enough for "Downloading… 100%".
+        for s in [micStatus, accStatus, modelStatus] {
+            s.font = .systemFont(ofSize: 12)
+            s.widthAnchor.constraint(equalToConstant: 160).isActive = true
+        }
 
         // Explains the default push-to-talk keys; changing them is optional.
         let hotkeyInfo = NSTextField(wrappingLabelWithString:
-            "Hold ⌘⇧ to dictate. “Dictate + Enter” is off — add or change either combo anytime.")
+            "Hold ⌘⇧ to dictate. “Dictate + Enter” is off - add or change either combo anytime.")
         hotkeyInfo.font = .systemFont(ofSize: 11); hotkeyInfo.textColor = .secondaryLabelColor
         hotkeyInfo.widthAnchor.constraint(equalToConstant: 210).isActive = true
 
@@ -1414,10 +1449,10 @@ final class OnboardWindowController: NSWindowController, NSWindowDelegate {
         if let p = pendingText { l.stringValue = p; l.textColor = .secondaryLabelColor; return }
         l.stringValue = ok ? "✓ Ready" : "✕ Not yet"
         l.textColor = ok ? .systemGreen : .systemOrange
-        l.widthAnchor.constraint(equalToConstant: 110).isActive = true
     }
 
     func refresh() {
+        app?.ensureEventTap()   // upgrade the tap to global the moment Accessibility is granted
         setStatus(micStatus, micGranted()); micBtn.isEnabled = !micGranted()
         setStatus(accStatus, accessibilityGranted()); accBtn.isEnabled = !accessibilityGranted()
         let key = app?.cfg.model ?? "multilingual"
@@ -1449,7 +1484,7 @@ final class OnboardWindowController: NSWindowController, NSWindowDelegate {
 
     func show() {
         refresh()
-        // Model is no longer bundled — kick off the download automatically on first run.
+        // Model is no longer bundled - kick off the download automatically on first run.
         if let app, !app.downloading, !modelDownloaded(app.cfg.model) { app.setModel(app.cfg.model) }
         if timer == nil {
             timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in self?.refresh() }
@@ -1467,6 +1502,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let parakeet = ParakeetServer()
     let history = History()
     var eventTap: CFMachPort?
+    private var eventTapSource: CFRunLoopSource?
+    private var tapInstalledTrusted = false
     var cfg = Config.load()
     var isRecording = false
     var pendingEnter = false
@@ -1513,6 +1550,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if onboardWC == nil { onboardWC = OnboardWindowController(app: self) }
         onboardWC?.show()
     }
+
+    // Returning to Ghoasty after granting Accessibility in System Settings: re-check trust
+    // and upgrade the tap to global if it just flipped, so no manual relaunch is needed.
+    func applicationDidBecomeActive(_ notification: Notification) { ensureEventTap() }
 
     func applicationWillTerminate(_ notification: Notification) { parakeet.stop() }
 
@@ -1581,18 +1622,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         settingsWC?.refresh()
     }
 
-    // Request mic once if undecided. Accessibility is guided by the onboarding window.
+    // Log permission status only. We never request on launch - the onboarding window's
+    // "Grant" buttons drive each request one at a time, on user click.
     func checkPermissions() {
-        if AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined {
-            AVCaptureDevice.requestAccess(for: .audio) { _ in }
-        }
+        let mic = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+        logf("microphone \(mic ? "granted" : "missing")")
         logf("accessibility \(AXIsProcessTrusted() ? "granted" : "missing")")
     }
 
-    // CGEventTap: global keyboard listen gated by Accessibility only — no Input Monitoring
+    // CGEventTap: global keyboard listen gated by Accessibility only - no Input Monitoring
     // permission needed (same approach dictation apps like Wispr Flow use). Sees every app
     // and our own windows, so it also drives key-capture in Settings.
+    // A tap created while Accessibility is untrusted is local-only (fires only for our own
+    // app), which is why the hotkey "works only when focused." Recreate it whenever the
+    // trust state changes so a fresh grant upgrades it to global without a manual relaunch.
+    func ensureEventTap() {
+        if eventTap == nil || AXIsProcessTrusted() != tapInstalledTrusted { installEventTap() }
+    }
+
     func installEventTap() {
+        // Tear down any existing tap first so this is safe to call repeatedly.
+        if let src = eventTapSource {
+            CFRunLoopRemoveSource(CFRunLoopGetCurrent(), src, .commonModes)
+            eventTapSource = nil
+        }
+        if let tap = eventTap { CGEvent.tapEnable(tap: tap, enable: false); eventTap = nil }
+
         let mask = CGEventMask(1 << CGEventType.flagsChanged.rawValue)
         let cb: CGEventTapCallBack = { _, type, event, refcon in
             guard let refcon = refcon else { return Unmanaged.passUnretained(event) }
@@ -1609,14 +1664,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             tap: .cgSessionEventTap, place: .headInsertEventTap,
             options: .listenOnly, eventsOfInterest: mask, callback: cb, userInfo: ptr)
         else {
-            logf("EVENT TAP FAILED — grant Accessibility to Ghoasty")
+            logf("EVENT TAP FAILED - grant Accessibility to Ghoasty")
             return
         }
         eventTap = tap
         let src = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+        eventTapSource = src
         CFRunLoopAddSource(CFRunLoopGetCurrent(), src, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
-        logf("event tap installed OK")
+        tapInstalledTrusted = AXIsProcessTrusted()
+        logf("event tap installed OK (trusted=\(tapInstalledTrusted))")
     }
 
     func process(_ mods: Mods) {
@@ -1754,7 +1811,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let ver = menu.addItem(withTitle: "Ghoasty 1.0 · Parakeet v3", action: nil, keyEquivalent: "")
         ver.isEnabled = false
         menu.addItem(.separator())
-        let names = { (cs: [Int]) in cs.isEmpty ? "—" : cs.map { Mods(rawValue: $0).name }.joined(separator: ", ") }
+        let names = { (cs: [Int]) in cs.isEmpty ? "-" : cs.map { Mods(rawValue: $0).name }.joined(separator: ", ") }
         menu.addItem(withTitle: "Dictate:  \(names(cfg.dictateChords))", action: nil, keyEquivalent: "")
         menu.addItem(withTitle: "Dictate + Enter:  \(names(cfg.dictateEnterChords))", action: nil, keyEquivalent: "")
         menu.addItem(.separator())

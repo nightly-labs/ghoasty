@@ -6,23 +6,23 @@ cd "$(dirname "$0")"
 
 APP="Ghoasty.app"
 BIN="Ghoasty"
-VERSION="1.1"                                   # marketing version — bump by hand for releases
+VERSION="1.2"                                   # marketing version - bump by hand for releases
 BUILD="$(git rev-list --count HEAD 2>/dev/null || echo 1)"   # monotonic build no. for Sparkle; auto-increments each commit
 BUNDLE_ID="com.akudama.ghoasty"
 PK_MODEL="models/parakeet-tdt-0.6b-v3-f16.gguf"
 PK_MODEL_URL="https://huggingface.co/mudler/parakeet-cpp-gguf/resolve/main/tdt-0.6b-v3-f16.gguf"
-# Sparkle public EdDSA key — filled in from setup-sparkle.sh output. Empty = updates disabled.
+# Sparkle public EdDSA key - filled in from setup-sparkle.sh output. Empty = updates disabled.
 SU_FEED_URL="https://updates.ghoasty.ai/appcast.xml"
 SU_PUBLIC_ED_KEY="${SU_PUBLIC_ED_KEY:-LUBuPY2qamW1lrdak4QXEGJq/Oa1ygOM60m1CxK5438=}"
 
-# 1. model — kept beside the app in dev; dist.sh bundles it into the app
+# 1. model - kept beside the app in dev; dist.sh bundles it into the app
 mkdir -p models
 if [ ! -f "$PK_MODEL" ]; then
   echo "==> downloading Parakeet v3 model (~1.4GB)..."
   curl -L --fail -o "$PK_MODEL" "$PK_MODEL_URL"
 fi
 
-# 1b. Parakeet engine (parakeet.cpp, C++/ggml with Metal) — clone + build if missing
+# 1b. Parakeet engine (parakeet.cpp, C++/ggml with Metal) - clone + build if missing
 if [ ! -x parakeet.cpp/build/examples/server/parakeet-server ]; then
   echo "==> building parakeet.cpp (Metal)..."
   [ -d parakeet.cpp ] || git clone --depth 1 https://github.com/mudler/parakeet.cpp
@@ -32,12 +32,12 @@ if [ ! -x parakeet.cpp/build/examples/server/parakeet-server ]; then
     && cmake --build build -j )
 fi
 
-# 2. compile — link Sparkle only if the framework has been fetched (setup-sparkle.sh)
+# 2. compile - link Sparkle only if the framework has been fetched (setup-sparkle.sh)
 echo "==> compiling..."
 mkdir -p build
 SPARKLE_FLAGS=()
 if [ -d "Frameworks/Sparkle.framework" ]; then
-  echo "    (Sparkle framework found — enabling auto-update)"
+  echo "    (Sparkle framework found - enabling auto-update)"
   SPARKLE_FLAGS=(-F Frameworks -framework Sparkle
                  -Xlinker -rpath -Xlinker "@loader_path/../Frameworks")
 fi
@@ -82,13 +82,21 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-# 4. sign. Prefer the stable WisprLiteDev identity so macOS permissions
-#    (Accessibility, Mic) persist across rebuilds. Falls back to ad-hoc.
-if security find-identity -v -p codesigning 2>/dev/null | grep -q "WisprLiteDev"; then
-  echo "==> signing with stable identity WisprLiteDev"
+# 4. sign so macOS TCC (Accessibility, Mic) grants persist across rebuilds.
+#    Prefer an Apple Development cert: it chains to Apple's root, so the code
+#    requirement is cert+team based (stable) and a grant survives every rebuild.
+#    A self-signed cert (WisprLiteDev) or ad-hoc pins the cdhash instead, so the
+#    grant resets on each build - only a fallback when no Apple cert is present.
+DEV_ID=$(security find-identity -v -p codesigning 2>/dev/null \
+         | sed -n 's/.*"\(Apple Development: [^"]*\)".*/\1/p' | head -1)
+if [ -n "$DEV_ID" ]; then
+  echo "==> signing with $DEV_ID (TCC grants persist across rebuilds)"
+  codesign --force --deep -s "$DEV_ID" "$APP"
+elif security find-identity -v -p codesigning 2>/dev/null | grep -q "WisprLiteDev"; then
+  echo "==> signing with WisprLiteDev (self-signed - TCC grants reset each rebuild)"
   codesign --force --deep -s "WisprLiteDev" "$APP"
 else
-  echo "==> WisprLiteDev not present — signing ad-hoc (permissions won't persist)"
+  echo "==> ad-hoc signing (permissions won't persist)"
   codesign --force --deep -s - "$APP"
 fi
 

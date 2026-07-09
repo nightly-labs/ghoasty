@@ -18,7 +18,7 @@ SERVER_SRC="parakeet.cpp/build/examples/server/parakeet-server"
 LIBS="libggml libggml-base libggml-cpu libggml-blas libggml-metal"
 
 # 0. compile app + build parakeet.cpp (build.sh rebuilds the .app fresh each run).
-#    The model is NOT bundled — the app downloads it on first run via onboarding.
+#    The model is NOT bundled - the app downloads it on first run via onboarding.
 ./build.sh
 
 # 1. vendor native deps into the bundle so it's relocatable
@@ -54,7 +54,7 @@ fi
 # 3. sign inside-out with Developer ID + hardened runtime (nested first, bundle last; no --deep)
 echo "==> signing"
 SIGN=(codesign --force --options runtime --timestamp -s "$ID")
-# 3a. Sparkle framework (sign nested helpers explicitly — Sparkle forbids --deep)
+# 3a. Sparkle framework (sign nested helpers explicitly - Sparkle forbids --deep)
 SPK="$APP/Contents/Frameworks/Sparkle.framework"
 if [ -d "$SPK" ]; then
   echo "    signing Sparkle.framework"
@@ -75,7 +75,7 @@ codesign --force --options runtime --timestamp \
 codesign --verify --deep --strict --verbose=2 "$APP"
 
 if [ "${SKIP_NOTARIZE:-0}" = "1" ]; then
-  echo "==> SKIP_NOTARIZE set — signed but not notarized. Done: $PWD/$APP"
+  echo "==> SKIP_NOTARIZE set - signed but not notarized. Done: $PWD/$APP"
   exit 0
 fi
 
@@ -114,7 +114,7 @@ if [ -x "$GEN" ]; then
   echo "    appcast: $PWD/releases/appcast.xml"
   echo "    To publish (upload DMG + appcast to R2): ./publish.sh"
 else
-  echo "==> Sparkle not set up (run ./setup-sparkle.sh) — skipping appcast"
+  echo "==> Sparkle not set up (run ./setup-sparkle.sh) - skipping appcast"
 fi
 
 echo "==> done"

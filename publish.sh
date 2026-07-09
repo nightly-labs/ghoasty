@@ -15,13 +15,13 @@ APP="Ghoasty.app"
 DMG="Ghoasty.dmg"
 
 # 0. artifacts must exist (produced by ./dist.sh)
-[ -f "$DMG" ] || { echo "!! $DMG missing — run ./dist.sh first"; exit 1; }
-[ -d "$APP" ] || { echo "!! $APP missing — run ./dist.sh first"; exit 1; }
+[ -f "$DMG" ] || { echo "!! $DMG missing - run ./dist.sh first"; exit 1; }
+[ -d "$APP" ] || { echo "!! $APP missing - run ./dist.sh first"; exit 1; }
 VER=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Contents/Info.plist")
 VDMG="releases/Ghoasty-$VER.dmg"
 APPCAST="releases/appcast.xml"
-[ -f "$VDMG" ]    || { echo "!! $VDMG missing — run ./dist.sh first"; exit 1; }
-[ -f "$APPCAST" ] || { echo "!! $APPCAST missing — run ./setup-sparkle.sh then ./dist.sh"; exit 1; }
+[ -f "$VDMG" ]    || { echo "!! $VDMG missing - run ./dist.sh first"; exit 1; }
+[ -f "$APPCAST" ] || { echo "!! $APPCAST missing - run ./setup-sparkle.sh then ./dist.sh"; exit 1; }
 
 # wrangler r2 object put keys are bucket/key; --remote hits real R2 (not the local sim).
 # Use the repo-pinned wrangler via bun from web/.
@@ -32,11 +32,11 @@ put() {  # $1=key  $2=file  $3=content-type  $4=cache-control
       --content-type "$3" --cache-control "$4" )
 }
 
-# 1. stable "latest" for the landing page — short cache so new ships propagate fast
+# 1. stable "latest" for the landing page - short cache so new ships propagate fast
 put "$DMG"              "$DMG"     "application/x-apple-diskimage" "public, max-age=300, must-revalidate"
 # 2. immutable versioned archive (Sparkle enclosures point here)
 put "Ghoasty-$VER.dmg" "$VDMG"    "application/x-apple-diskimage" "public, max-age=31536000, immutable"
-# 3. Sparkle appcast — short cache so clients see new versions promptly
+# 3. Sparkle appcast - short cache so clients see new versions promptly
 put "appcast.xml"      "$APPCAST" "application/xml"               "public, max-age=300, must-revalidate"
 
 echo "==> published version $VER"

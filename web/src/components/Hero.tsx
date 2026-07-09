@@ -113,7 +113,7 @@ export function Hero() {
 
         <div className="t-stagger-line t-stagger-line--5 mt-11 flex flex-col items-center gap-3.5">
           <a
-            href="https://updates.ghoasty.ai/Ghoasty.dmg"
+            href="/download/Ghoasty.dmg"
             download
             className="group inline-flex items-center gap-2.5 rounded-full bg-white px-8 py-4.5 text-lg font-medium text-black transition-transform duration-150 hover:scale-[1.02] active:scale-[0.99]"
           >
