@@ -36,11 +36,13 @@ function SocialLink({
   href,
   label,
   tooltip,
+  platform,
   children,
 }: {
   href: string
   label: string
   tooltip: string
+  platform: string
   children: ReactNode
 }) {
   return (
@@ -49,6 +51,8 @@ function SocialLink({
       target="_blank"
       rel="noopener noreferrer"
       aria-label={label}
+      data-track="social_click"
+      data-platform={platform}
       className="group relative flex h-10 w-10 items-center justify-center rounded-full bg-black/25 text-white/80 ring-1 ring-white/15 backdrop-blur-xl transition duration-150 hover:bg-black/35 hover:text-white active:scale-[0.95]"
     >
       {children}
@@ -90,10 +94,20 @@ export function Hero() {
 
       {/* Social links */}
       <div className="t-fade absolute bottom-0 right-0 z-10 flex items-center gap-2.5 p-6 sm:p-8">
-        <SocialLink href="https://x.com/norbertbodziony" label="X (Twitter)" tooltip="@norbertbodziony">
+        <SocialLink
+          href="https://x.com/norbertbodziony"
+          label="X (Twitter)"
+          tooltip="@norbertbodziony"
+          platform="x"
+        >
           <XGlyph />
         </SocialLink>
-        <SocialLink href="https://t.me/norbertbodziony" label="Telegram" tooltip="@norbertbodziony">
+        <SocialLink
+          href="https://t.me/norbertbodziony"
+          label="Telegram"
+          tooltip="@norbertbodziony"
+          platform="telegram"
+        >
           <TelegramGlyph />
         </SocialLink>
       </div>
@@ -115,6 +129,7 @@ export function Hero() {
           <a
             href="/download/Ghoasty.dmg"
             download
+            data-track="download"
             className="group inline-flex items-center gap-2.5 rounded-full bg-white px-8 py-4.5 text-lg font-medium text-black transition-transform duration-150 hover:scale-[1.02] active:scale-[0.99]"
           >
             <AppleGlyph />

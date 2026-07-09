@@ -1,6 +1,8 @@
 import { HeadContent, Scripts, createRootRoute } from '@tanstack/react-router'
+import { useEffect } from 'react'
 
 import appCss from '../styles.css?url'
+import { initOpenPanel } from '../lib/op'
 
 const SITE_URL = 'https://ghoasty.ai'
 const TITLE = 'Ghoasty: private, on-device dictation for macOS'
@@ -44,6 +46,10 @@ export const Route = createRootRoute({
 })
 
 function RootDocument({ children }: { children: React.ReactNode }) {
+  useEffect(() => {
+    initOpenPanel()
+  }, [])
+
   return (
     <html lang="en">
       <head>
