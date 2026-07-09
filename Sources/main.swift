@@ -885,6 +885,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
     private let modelList = NSStackView()
     private let accStatus = NSTextField(labelWithString: "")
     private let micStatus = NSTextField(labelWithString: "")
+    private let imStatus = NSTextField(labelWithString: "")
     private let dictBtn = NSButton(title: "Edit dictionary…", target: nil, action: nil)
 
     static func caption(_ s: String) -> NSTextField {
@@ -994,6 +995,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         let grid = NSGridView(views: [
             [SettingsWindowController.caption("Accessibility"), permRow(accStatus, #selector(openAcc))],
             [SettingsWindowController.caption("Microphone"), permRow(micStatus, #selector(openMic))],
+            [SettingsWindowController.caption("Input monitoring"), permRow(imStatus, #selector(openInput))],
             [SettingsWindowController.caption("Model"), modelList],
             [SettingsWindowController.caption("Dictate"), dictateChips],
             [SettingsWindowController.caption("Dictate + Enter"), enterChips],
@@ -1011,7 +1013,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         grid.rowSpacing = 9
         grid.columnSpacing = 16
         grid.column(at: 0).xPlacement = .trailing
-        for i in 0..<15 { grid.row(at: i).yPlacement = .center }
+        for i in 0..<16 { grid.row(at: i).yPlacement = .center }
 
         let hint = NSTextField(wrappingLabelWithString:
             "Hotkeys: add modifier combos (⌥, ⌘⇧, ⌃⌥, Fn…) - any starts dictation; “Dictate + Enter” also presses Return. "
@@ -1091,6 +1093,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
 
         setPermLabel(accStatus, accessibilityGranted())
         setPermLabel(micStatus, micGranted())
+        setPermLabel(imStatus, inputMonitoringGranted())
+        app?.ensureEventTap()   // upgrade the tap to global once Input Monitoring / Accessibility land
 
         for v in modelList.arrangedSubviews { modelList.removeArrangedSubview(v); v.removeFromSuperview() }
         for (i, m) in MODELS.enumerated() { modelList.addArrangedSubview(modelRow(m, index: i)) }
@@ -1132,6 +1136,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
     @objc func openDictionary() { app?.openDict() }
 
     @objc func openAcc() { openPrivacyPane("Privacy_Accessibility") }
+    @objc func openInput() {
+        _ = IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)   // adds Ghoasty to the list + prompts
+        openPrivacyPane("Privacy_ListenEvent")
+    }
     @objc func openMic() {
         if AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined {
             AVCaptureDevice.requestAccess(for: .audio) { _ in DispatchQueue.main.async { self.refresh() } }
