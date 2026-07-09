@@ -2,6 +2,7 @@ import AppKit
 import AVFoundation
 import ApplicationServices
 import CoreAudio
+import IOKit.hid   // Input Monitoring status/prompt for the keyboard event tap (macOS 10.15+)
 import ServiceManagement
 #if canImport(Sparkle)
 import Sparkle   // auto-update; only linked in the production build (see setup-sparkle.sh)
@@ -61,6 +62,9 @@ func modelDownloaded(_ key: String) -> Bool { existingModelPath(modelInfo(key).f
 // ---- Permissions ----
 func accessibilityGranted() -> Bool { AXIsProcessTrusted() }
 func micGranted() -> Bool { AVCaptureDevice.authorizationStatus(for: .audio) == .authorized }
+// Input Monitoring: required on modern macOS for a CGEventTap to receive keyboard
+// events globally (not just when Ghoasty is focused). Accessibility alone is not enough.
+func inputMonitoringGranted() -> Bool { IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) == kIOHIDAccessTypeGranted }
 func openPrivacyPane(_ anchor: String) {
     if let u = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(anchor)") {
         NSWorkspace.shared.open(u)
@@ -1380,8 +1384,10 @@ final class OnboardWindowController: NSWindowController, NSWindowDelegate {
     private let micStatus = NSTextField(labelWithString: "")
     private let accStatus = NSTextField(labelWithString: "")
     private let modelStatus = NSTextField(labelWithString: "")
+    private let imStatus = NSTextField(labelWithString: "")
     private let micBtn = NSButton(title: "Grant", target: nil, action: nil)
     private let accBtn = NSButton(title: "Grant", target: nil, action: nil)
+    private let imBtn = NSButton(title: "Grant", target: nil, action: nil)
     private let modelBtn = NSButton(title: "Download", target: nil, action: nil)
     private let hotkeyBtn = NSButton(title: "Customize…", target: nil, action: nil)
     private var timer: Timer?
@@ -1394,16 +1400,17 @@ final class OnboardWindowController: NSWindowController, NSWindowDelegate {
 
         let title = NSTextField(labelWithString: "Welcome to Ghoasty")
         title.font = .systemFont(ofSize: 18, weight: .bold)
-        let subtitle = NSTextField(labelWithString: "Grant two permissions - the model downloads automatically.")
+        let subtitle = NSTextField(labelWithString: "Grant three permissions - the model downloads automatically.")
         subtitle.font = .systemFont(ofSize: 12); subtitle.textColor = .secondaryLabelColor
 
         micBtn.target = self; micBtn.action = #selector(grantMic)
         accBtn.target = self; accBtn.action = #selector(grantAcc)
+        imBtn.target = self; imBtn.action = #selector(grantInput)
         modelBtn.target = self; modelBtn.action = #selector(downloadStep)
         hotkeyBtn.target = self; hotkeyBtn.action = #selector(customizeHotkeys)
-        for b in [micBtn, accBtn, modelBtn, hotkeyBtn] { b.bezelStyle = .rounded }
+        for b in [micBtn, accBtn, imBtn, modelBtn, hotkeyBtn] { b.bezelStyle = .rounded }
         // Status column: fixed width once, wide enough for "Downloading… 100%".
-        for s in [micStatus, accStatus, modelStatus] {
+        for s in [micStatus, accStatus, imStatus, modelStatus] {
             s.font = .systemFont(ofSize: 12)
             s.widthAnchor.constraint(equalToConstant: 160).isActive = true
         }
@@ -1417,12 +1424,13 @@ final class OnboardWindowController: NSWindowController, NSWindowDelegate {
         let grid = NSGridView(views: [
             [step("1. Microphone"), micStatus, micBtn],
             [step("2. Accessibility"), accStatus, accBtn],
-            [step("3. Model"), modelStatus, modelBtn],
-            [step("4. Hotkeys"), hotkeyInfo, hotkeyBtn],
+            [step("3. Input monitoring"), imStatus, imBtn],
+            [step("4. Model"), modelStatus, modelBtn],
+            [step("5. Hotkeys"), hotkeyInfo, hotkeyBtn],
         ])
         grid.rowSpacing = 16; grid.columnSpacing = 14
         grid.column(at: 0).xPlacement = .leading
-        for i in 0..<4 { grid.row(at: i).yPlacement = .center }
+        for i in 0..<5 { grid.row(at: i).yPlacement = .center }
 
         let done = NSButton(title: "Done", target: self, action: #selector(finish))
         done.bezelStyle = .rounded; done.keyEquivalent = "\r"
@@ -1455,6 +1463,7 @@ final class OnboardWindowController: NSWindowController, NSWindowDelegate {
         app?.ensureEventTap()   // upgrade the tap to global the moment Accessibility is granted
         setStatus(micStatus, micGranted()); micBtn.isEnabled = !micGranted()
         setStatus(accStatus, accessibilityGranted()); accBtn.isEnabled = !accessibilityGranted()
+        setStatus(imStatus, inputMonitoringGranted()); imBtn.isEnabled = !inputMonitoringGranted()
         let key = app?.cfg.model ?? "multilingual"
         if app?.downloading == true {
             setStatus(modelStatus, false, "Downloading… \(Int((app?.downloadProgress ?? 0) * 100))%")
@@ -1476,6 +1485,10 @@ final class OnboardWindowController: NSWindowController, NSWindowDelegate {
         let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
         _ = AXIsProcessTrustedWithOptions(opts)
         openPrivacyPane("Privacy_Accessibility")
+    }
+    @objc private func grantInput() {
+        _ = IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)   // adds Ghoasty to the list + prompts
+        openPrivacyPane("Privacy_ListenEvent")
     }
     @objc private func downloadStep() { app?.setModel(app?.cfg.model ?? "multilingual") }
     @objc private func finish() { window?.close() }
@@ -1543,7 +1556,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         installEventTap()
 
         // First run / incomplete setup → guide the user through permissions + model.
-        if !accessibilityGranted() || !modelDownloaded(cfg.model) { openOnboarding() }
+        if !accessibilityGranted() || !inputMonitoringGranted() || !modelDownloaded(cfg.model) { openOnboarding() }
     }
 
     func openOnboarding() {
@@ -1628,16 +1641,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let mic = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
         logf("microphone \(mic ? "granted" : "missing")")
         logf("accessibility \(AXIsProcessTrusted() ? "granted" : "missing")")
+        logf("inputMonitoring \(inputMonitoringGranted() ? "granted" : "missing")")
     }
 
     // CGEventTap: global keyboard listen gated by Accessibility only - no Input Monitoring
     // permission needed (same approach dictation apps like Wispr Flow use). Sees every app
     // and our own windows, so it also drives key-capture in Settings.
-    // A tap created while Accessibility is untrusted is local-only (fires only for our own
-    // app), which is why the hotkey "works only when focused." Recreate it whenever the
-    // trust state changes so a fresh grant upgrades it to global without a manual relaunch.
+    // A tap created before Input Monitoring / Accessibility is granted is local-only (fires
+    // only for our own app), which is why the hotkey "works only when focused." Recreate it
+    // whenever either grant changes so a fresh grant upgrades it to global without a relaunch.
+    private var tapTrust: Bool { AXIsProcessTrusted() && inputMonitoringGranted() }
     func ensureEventTap() {
-        if eventTap == nil || AXIsProcessTrusted() != tapInstalledTrusted { installEventTap() }
+        if eventTap == nil || tapTrust != tapInstalledTrusted { installEventTap() }
     }
 
     func installEventTap() {
@@ -1672,8 +1687,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         eventTapSource = src
         CFRunLoopAddSource(CFRunLoopGetCurrent(), src, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
-        tapInstalledTrusted = AXIsProcessTrusted()
-        logf("event tap installed OK (trusted=\(tapInstalledTrusted))")
+        tapInstalledTrusted = tapTrust
+        logf("event tap installed OK (accessibility=\(AXIsProcessTrusted()) inputMonitoring=\(inputMonitoringGranted()))")
     }
 
     func process(_ mods: Mods) {
