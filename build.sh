@@ -7,7 +7,7 @@ cd "$(dirname "$0")"
 APP="Ghoasty.app"
 BIN="Ghoasty"
 VERSION="1.2"                                   # marketing version - bump by hand for releases
-BUILD="$(git rev-list --count HEAD 2>/dev/null || echo 1)"   # monotonic build no. for Sparkle; auto-increments each commit
+BUILD="$(date +%s)"                             # epoch seconds: always unique + monotonic, so Sparkle never sees a duplicate build (even rebuilding the same commit)
 BUNDLE_ID="com.akudama.ghoasty"
 PK_MODEL="models/parakeet-tdt-0.6b-v3-f16.gguf"
 PK_MODEL_URL="https://huggingface.co/mudler/parakeet-cpp-gguf/resolve/main/tdt-0.6b-v3-f16.gguf"
