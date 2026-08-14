@@ -14,6 +14,7 @@ struct DictationLogicTests {
         testLifecycleCancellation()
         testLifecycleBlocksOverlap()
         testPasteDelay()
+        testMenuVersion()
         print("DictationLogicTests: PASS")
     }
 
@@ -74,5 +75,12 @@ struct DictationLogicTests {
                "a result at the grace deadline must paste immediately")
         expect(pasteDelay(releasedAt: 10, now: 11) == 0,
                "slow transcription must not add another delay")
+    }
+
+    private static func testMenuVersion() {
+        expect(ghoastyMenuTitle(version: "1.5.1") == "Ghoasty 1.5.1 · Parakeet v3",
+               "the menu title must use the bundle version")
+        expect(ghoastyMenuTitle(version: nil) == "Ghoasty ? · Parakeet v3",
+               "the menu title must have a safe fallback")
     }
 }

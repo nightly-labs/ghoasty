@@ -1911,7 +1911,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func buildMenu() {
         let menu = NSMenu()
-        let ver = menu.addItem(withTitle: "Ghoasty 1.0 · Parakeet v3", action: nil, keyEquivalent: "")
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
+        let ver = menu.addItem(withTitle: ghoastyMenuTitle(version: version), action: nil, keyEquivalent: "")
         ver.isEnabled = false
         menu.addItem(.separator())
         let names = { (cs: [Int]) in cs.isEmpty ? "-" : cs.map { Mods(rawValue: $0).name }.joined(separator: ", ") }

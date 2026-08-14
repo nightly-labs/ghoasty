@@ -79,3 +79,7 @@ struct DictationLifecycle {
 func pasteDelay(releasedAt: TimeInterval, now: TimeInterval) -> TimeInterval {
     max(0, DictationPolicy.escapeGraceSeconds - (now - releasedAt))
 }
+
+func ghoastyMenuTitle(version: String?) -> String {
+    "Ghoasty \(version ?? "?") · Parakeet v3"
+}

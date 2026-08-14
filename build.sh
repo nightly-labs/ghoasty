@@ -6,7 +6,7 @@ cd "$(dirname "$0")"
 
 APP="Ghoasty.app"
 BIN="Ghoasty"
-VERSION="1.5"                                   # marketing version - bump by hand for releases
+VERSION="1.5.1"                                 # marketing version - bump by hand for releases
 BUILD="$(date +%s)"                             # epoch seconds: always unique + monotonic, so Sparkle never sees a duplicate build (even rebuilding the same commit)
 BUNDLE_ID="com.akudama.ghoasty"
 PK_MODEL="models/parakeet-tdt-0.6b-v3-f16.gguf"
