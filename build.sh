@@ -6,7 +6,7 @@ cd "$(dirname "$0")"
 
 APP="Ghoasty.app"
 BIN="Ghoasty"
-VERSION="1.4"                                   # marketing version - bump by hand for releases
+VERSION="1.5"                                   # marketing version - bump by hand for releases
 BUILD="$(date +%s)"                             # epoch seconds: always unique + monotonic, so Sparkle never sees a duplicate build (even rebuilding the same commit)
 BUNDLE_ID="com.akudama.ghoasty"
 PK_MODEL="models/parakeet-tdt-0.6b-v3-f16.gguf"
@@ -41,7 +41,7 @@ if [ -d "Frameworks/Sparkle.framework" ]; then
   SPARKLE_FLAGS=(-F Frameworks -framework Sparkle
                  -Xlinker -rpath -Xlinker "@loader_path/../Frameworks")
 fi
-swiftc -O -target arm64-apple-macos13.0 Sources/main.swift -o "build/$BIN" \
+swiftc -O -target arm64-apple-macos13.0 Sources/DictationLogic.swift Sources/main.swift -o "build/$BIN" \
   -framework AppKit -framework AVFoundation ${SPARKLE_FLAGS[@]+"${SPARKLE_FLAGS[@]}"}
 
 # 3. assemble .app bundle

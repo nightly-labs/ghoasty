@@ -293,6 +293,12 @@ func deviceID(forUID uid: String) -> AudioDeviceID? {
 }
 
 final class Recorder {
+    struct Result {
+        let wavURL: URL
+        let hasSpeech: Bool
+        let voicedSeconds: TimeInterval
+    }
+
     let wavURL = FileManager.default.temporaryDirectory.appendingPathComponent("ghoasty_rec.wav")
     var deviceUID: String?          // nil → built-in mic
     var boost = true                // AGC + noise gate before transcription
@@ -303,6 +309,7 @@ final class Recorder {
     private var writeFormat: AVAudioFormat?   // = file.processingFormat (what write() expects)
     private var curLevel: CGFloat = 0
     private var running = false
+    private var speechActivity = SpeechActivityTracker()
 
     // On-disk WAV: 16 kHz mono PCM16 - what Parakeet wants.
     private let fileSettings: [String: Any] = [
@@ -338,6 +345,7 @@ final class Recorder {
         writeFormat = f.processingFormat
         converter = AVAudioConverter(from: inFormat, to: f.processingFormat)
         runningPeak = 0.05
+        speechActivity.reset()
 
         input.installTap(onBus: 0, bufferSize: 4096, format: inFormat) { [weak self] buf, _ in
             self?.handle(buf)
@@ -353,6 +361,7 @@ final class Recorder {
             var sum: Float = 0, peak: Float = 0
             for i in 0..<n { let s = ch[i]; sum += s * s; peak = max(peak, abs(s)) }
             let rms = n > 0 ? (sum / Float(n)).squareRoot() : 0
+            speechActivity.observe(rms: rms, frameCount: n, sampleRate: buffer.format.sampleRate)
             let db = 20 * log10f(max(rms, 1e-7))
             curLevel = CGFloat(max(0, min(1, (db + 50) / 50)))
 
@@ -378,12 +387,14 @@ final class Recorder {
         if outBuf.frameLength > 0 { try? file.write(from: outBuf) }
     }
 
-    func stop() -> URL? {
+    func stop() -> Result? {
         guard running else { return nil }
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
+        let result = Result(wavURL: wavURL, hasSpeech: speechActivity.hasSpeech,
+                            voicedSeconds: speechActivity.voicedSeconds)
         file = nil; converter = nil; writeFormat = nil; running = false; curLevel = 0
-        return wavURL
+        return result
     }
     func level() -> CGFloat { running ? curLevel : 0 }
 }
@@ -1516,6 +1527,15 @@ final class OnboardWindowController: NSWindowController, NSWindowDelegate {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private struct ActiveDictation {
+        let id: UInt64
+        let pressEnter: Bool
+        let startedAt: Date
+        var releasedAtUptime: TimeInterval?
+    }
+
+    private static let escapeKeyCode: Int64 = 53
+
     let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     let recorder = Recorder()
     let transcriber = Transcriber()
@@ -1526,11 +1546,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var eventTapSource: CFRunLoopSource?
     private var tapInstalledTrusted = false
     var cfg = Config.load()
-    var isRecording = false
-    var pendingEnter = false
+    private var dictationLifecycle = DictationLifecycle()
+    private var activeDictation: ActiveDictation?
+    private var swallowEscapeUntilKeyUp = false
     var activeChord: Mods?
     var captureMask: Mods = []
-    var recordStart = Date()
     var capturing: Capturing = .none
     var settingsWC: SettingsWindowController?
     var dictWC: DictWindowController?
@@ -1652,9 +1672,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         logf("inputMonitoring \(inputMonitoringGranted() ? "granted" : "missing")")
     }
 
-    // CGEventTap: global keyboard listen gated by Accessibility only - no Input Monitoring
-    // permission needed (same approach dictation apps like Wispr Flow use). Sees every app
-    // and our own windows, so it also drives key-capture in Settings.
+    // CGEventTap: global keyboard listen gated by Accessibility and Input Monitoring.
+    // It sees every app and our own windows, so it also drives key-capture in Settings.
+    // A normal tap (not listen-only) lets us consume Escape only when it cancels dictation.
     // A tap created before Input Monitoring / Accessibility is granted is local-only (fires
     // only for our own app), which is why the hotkey "works only when focused." Recreate it
     // whenever either grant changes so a fresh grant upgrades it to global without a relaunch.
@@ -1672,20 +1692,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let tap = eventTap { CGEvent.tapEnable(tap: tap, enable: false); eventTap = nil }
 
         let mask = CGEventMask(1 << CGEventType.flagsChanged.rawValue)
-        let cb: CGEventTapCallBack = { _, type, event, refcon in
+            | CGEventMask(1 << CGEventType.keyDown.rawValue)
+            | CGEventMask(1 << CGEventType.keyUp.rawValue)
+        let cb: CGEventTapCallBack = { _, type, event, refcon -> Unmanaged<CGEvent>? in
             guard let refcon = refcon else { return Unmanaged.passUnretained(event) }
             let me = Unmanaged<AppDelegate>.fromOpaque(refcon).takeUnretainedValue()
             if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
                 if let tap = me.eventTap { CGEvent.tapEnable(tap: tap, enable: true) }
             } else if type == .flagsChanged {
                 me.process(Mods(flags: event.flags))
+            } else if event.getIntegerValueField(.keyboardEventKeycode) == AppDelegate.escapeKeyCode {
+                if type == .keyDown {
+                    if me.cancelActiveDictation() || me.swallowEscapeUntilKeyUp {
+                        me.swallowEscapeUntilKeyUp = true
+                        return nil
+                    }
+                } else if type == .keyUp, me.swallowEscapeUntilKeyUp {
+                    me.swallowEscapeUntilKeyUp = false
+                    return nil
+                }
             }
             return Unmanaged.passUnretained(event)
         }
         let ptr = Unmanaged.passUnretained(self).toOpaque()
         guard let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap, place: .headInsertEventTap,
-            options: .listenOnly, eventsOfInterest: mask, callback: cb, userInfo: ptr)
+            options: .defaultTap, eventsOfInterest: mask, callback: cb, userInfo: ptr)
         else {
             logf("EVENT TAP FAILED - grant Accessibility to Ghoasty")
             return
@@ -1717,23 +1749,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        if !isRecording {
+        if dictationLifecycle.phase == .idle {
             guard !mods.isEmpty else { return }
             let raw = mods.rawValue
             let isEnter = cfg.dictateEnterChords.contains(raw)
             let isDictate = cfg.dictateChords.contains(raw)
             if isEnter || isDictate { beginRecording(enter: isEnter, chord: mods) }
-        } else if mods != activeChord {
+        } else if dictationLifecycle.phase == .recording, mods != activeChord {
             endRecording()          // combo changed/released → stop
         }
     }
 
     func beginRecording(enter: Bool, chord: Mods) {
-        guard !isRecording else { return }
-        isRecording = true
-        pendingEnter = enter
+        guard let id = dictationLifecycle.begin() else { return }
+        activeDictation = ActiveDictation(id: id, pressEnter: enter, startedAt: Date())
         activeChord = chord
-        recordStart = Date()
         setState(.recording)
         if cfg.playSounds { NSSound(named: "Pop")?.play() }
         overlay?.setActive(true)
@@ -1741,43 +1771,93 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func endRecording() {
-        guard isRecording else { return }
-        isRecording = false
+        guard var session = activeDictation,
+              dictationLifecycle.release(session.id) else { return }
         activeChord = nil
-        let enter = pendingEnter
+        session.releasedAtUptime = ProcessInfo.processInfo.systemUptime
+        activeDictation = session
         // Keep the pill open through transcription so we can reveal WPM inline on the right.
-        setState(.warming)
+        setState(.processing)
         overlay?.stopTimer()   // freeze the live timer; WPM replaces it after transcription
-        guard let wav = recorder.stop() else { overlay?.setActive(false); setState(.ready); return }
-        let seconds = Date().timeIntervalSince(recordStart)
+        guard let recording = recorder.stop() else {
+            finishWithoutText(session.id)
+            return
+        }
+        guard recording.hasSpeech else {
+            logf(String(format: "NO SPEECH voiced=%.3fs", recording.voicedSeconds))
+            finishWithoutText(session.id)
+            return
+        }
+        let seconds = Date().timeIntervalSince(session.startedAt)
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
-            let result = self.transcriber.transcribe(wav)
+            let result = self.transcriber.transcribe(recording.wavURL)
             DispatchQueue.main.async {
+                guard self.dictationLifecycle.contains(session.id) else { return }
                 guard let raw = result else {            // request failed (server down / warming up)
                     logf("TRANSCRIBE FAILED")
+                    _ = self.dictationLifecycle.finish(session.id)
+                    self.activeDictation = nil
                     self.flashError()
                     self.overlay?.setActive(false)
                     return
                 }
                 let text = applyReplacements(raw, self.cfg.replacements)
                 logf("TRANSCRIPT len=\(text.count) trusted=\(AXIsProcessTrusted()) text='\(text.prefix(80))'")
-                self.paster.paste(text, pressEnter: enter, keepInClipboard: self.cfg.leaveInClipboard)
-                self.setState(.ready)
-                if !text.isEmpty {
-                    if self.cfg.playSounds { NSSound(named: "Tink")?.play() }
-                    self.history.add(text); self.buildMenu()
+                guard !text.isEmpty else {
+                    self.finishWithoutText(session.id)
+                    return
                 }
-                let words = text.split { $0 == " " || $0 == "\n" || $0 == "\t" }.count
-                let wpm = seconds > 0.5 ? Int((Double(words) / (seconds / 60)).rounded()) : 0
-                if words == 0 {
-                    self.overlay?.setActive(false)      // no speech → fade out immediately
-                } else if self.cfg.pillStyle == "full", wpm > 0 {
-                    self.overlay?.showStats(wpm: wpm)   // WPM, linger, then fade
-                } else {
-                    self.overlay?.holdThenHide()        // minimal → linger, then fade
+                guard self.dictationLifecycle.awaitPaste(session.id) else { return }
+                let releasedAt = session.releasedAtUptime ?? ProcessInfo.processInfo.systemUptime
+                let delay = pasteDelay(releasedAt: releasedAt,
+                                       now: ProcessInfo.processInfo.systemUptime)
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                    self?.completeDictation(session.id, text: text, seconds: seconds)
                 }
             }
+        }
+    }
+
+    @discardableResult
+    private func cancelActiveDictation() -> Bool {
+        let wasRecording = dictationLifecycle.phase == .recording
+        guard dictationLifecycle.cancel() != nil else { return false }
+        if wasRecording { _ = recorder.stop() }
+        activeDictation = nil
+        activeChord = nil
+        logf("DICTATION CANCELED")
+        overlay?.setActive(false)
+        setState(parakeet.ready ? .ready : .warming)
+        return true
+    }
+
+    private func finishWithoutText(_ id: UInt64) {
+        guard dictationLifecycle.finish(id) else { return }
+        activeDictation = nil
+        activeChord = nil
+        overlay?.setActive(false)
+        setState(parakeet.ready ? .ready : .warming)
+    }
+
+    private func completeDictation(_ id: UInt64, text: String, seconds: TimeInterval) {
+        guard let session = activeDictation,
+              session.id == id,
+              dictationLifecycle.phase == .awaitingPaste,
+              dictationLifecycle.finish(id) else { return }
+        activeDictation = nil
+        paster.paste(text, pressEnter: session.pressEnter, keepInClipboard: cfg.leaveInClipboard)
+        setState(parakeet.ready ? .ready : .warming)
+        if cfg.playSounds { NSSound(named: "Tink")?.play() }
+        history.add(text)
+        buildMenu()
+
+        let words = text.split { $0 == " " || $0 == "\n" || $0 == "\t" }.count
+        let wpm = seconds > 0.5 ? Int((Double(words) / (seconds / 60)).rounded()) : 0
+        if cfg.pillStyle == "full", wpm > 0 {
+            overlay?.showStats(wpm: wpm)
+        } else {
+            overlay?.holdThenHide()
         }
     }
 
