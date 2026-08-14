@@ -69,9 +69,9 @@ struct DictationLogicTests {
     }
 
     private static func testPasteDelay() {
-        expect(abs(pasteDelay(releasedAt: 10, now: 10.05) - 0.15) < 0.000_001,
-               "fast transcription must wait for the rest of the 200 ms window")
-        expect(pasteDelay(releasedAt: 10, now: 10.20) < 0.000_001,
+        expect(abs(pasteDelay(releasedAt: 10, now: 10.05) - 0.35) < 0.000_001,
+               "fast transcription must wait for the rest of the 400 ms window")
+        expect(pasteDelay(releasedAt: 10, now: 10.40) < 0.000_001,
                "a result at the grace deadline must paste immediately")
         expect(pasteDelay(releasedAt: 10, now: 11) == 0,
                "slow transcription must not add another delay")

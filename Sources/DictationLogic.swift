@@ -1,7 +1,7 @@
 import Foundation
 
 enum DictationPolicy {
-    static let escapeGraceSeconds: TimeInterval = 0.200
+    static let escapeGraceSeconds: TimeInterval = 0.400
     static let speechRMSThreshold: Float = 0.004
     static let minimumVoicedSeconds: TimeInterval = 0.120
 }
